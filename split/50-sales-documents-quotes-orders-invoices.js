@@ -285,6 +285,30 @@ function openItemPicker({ initialQuery = "" } = {}) {
   setTimeout(() => search.focus(), 0);
 }
 
+  // Add this helper inside openDocForm(...) above draw()
+async function ensurePdfModule() {
+  // Already present?
+  if (typeof window.downloadInvoicePDF === "function" ||
+      typeof window.exportInvoicePDF === "function" ||
+      typeof window.generateInvoicePDF === "function") return true;
+
+  // Try to lazy-load 60-pdf.js
+  try {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "split/60-pdf.js";            // adjust path if your file lives in /split/ or /assets/
+      s.defer = true;
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    return (typeof window.downloadInvoicePDF === "function" ||
+            typeof window.exportInvoicePDF === "function" ||
+            typeof window.generateInvoicePDF === "function");
+  } catch {
+    return false;
+  }
+}
   // ---------- Render ----------
   const draw = () => {
   body.innerHTML = `
