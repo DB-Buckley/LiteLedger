@@ -1,9 +1,11 @@
 // ===========================================================================
+// 50-sales-documents-quotes-orders-invoices.js
 // Sales Documents (Quotes / Orders / Invoices)
+//
 // Depends on: 01-db.js, 02-helpers.js ( $, $$, all, get, put, add, del,
 // whereIndex, nextDocNo, randId, nowISO, sumDoc, calcLineTotals, currency, toast )
 // Optional: adjustStockOnInvoice
-// Works with: 60-pdf.js (downloadInvoicePDFInto/downloadInvoicePDF)
+// Works with: 60-pdf.js (downloadInvoicePDFInto, getInvoiceHTML)
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE") {
@@ -13,6 +15,7 @@ async function renderSales(kind = "INVOICE") {
   const docs = (await all("docs"))
     .filter((d) => d.type === kind)
     .sort((a, b) => (b.dates?.issue || "").localeCompare(a.dates?.issue || ""));
+
   const customers = await all("customers");
   const cname = (id) => customers.find((c) => c.id === id)?.name || "—";
 
@@ -27,7 +30,9 @@ async function renderSales(kind = "INVOICE") {
     </div>
     <div class="bd">
       <table class="table">
-        <thead><tr><th>No</th><th>Customer</th><th>Date</th><th>Sub</th><th>VAT</th><th>Total</th><th></th></tr></thead>
+        <thead>
+          <tr><th>No</th><th>Customer</th><th>Date</th><th>Sub</th><th>VAT</th><th>Total</th><th></th></tr>
+        </thead>
         <tbody id="d_rows">
           ${docs.map(d => `
             <tr>
@@ -62,7 +67,7 @@ async function openDocForm(kind, docId) {
   const settings = settingsRec?.value || {};
   const allItemsRaw = await all("items");
 
-  // Normalize items for fast lookups and search
+  // Normalize items for search & code scans
   const items = (allItemsRaw || []).map((raw) => ({
     raw,
     id: raw.id ?? raw.itemId ?? raw.sku ?? raw.code ?? null,
@@ -70,7 +75,7 @@ async function openDocForm(kind, docId) {
     code: (raw.code ?? raw.sku ?? raw.id ?? "").toString(),
     sku: (raw.sku ?? "").toString(),
     barcode: (raw.barcode ?? raw.ean ?? "").toString(),
-    sellPrice: Number(raw.sellPrice ?? raw.price ?? raw.unitPrice ?? raw.defaultPrice ?? 0) || 0
+    sellPrice: Number(raw.sellPrice ?? raw.price ?? raw.unitPrice ?? raw.defaultPrice ?? 0) || 0,
   }));
 
   const doc = editing || {
@@ -82,7 +87,7 @@ async function openDocForm(kind, docId) {
     dates: { issue: nowISO().slice(0, 10), due: nowISO().slice(0, 10) },
     totals: { subTotal: 0, tax: 0, grandTotal: 0 },
     notes: "",
-    createdAt: nowISO()
+    createdAt: nowISO(),
   };
   const lines = editing ? await whereIndex("lines", "by_doc", doc.id) : [];
 
@@ -92,7 +97,7 @@ async function openDocForm(kind, docId) {
     return;
   }
 
-  // --- helpers --------------------------------------------------------------
+  // ---------------------- helpers ----------------------
 
   const custOpts = (customers || [])
     .map((c) => `<option value="${c.id}" ${c.id === doc.customerId ? "selected" : ""}>${c.name}</option>`)
@@ -109,7 +114,7 @@ async function openDocForm(kind, docId) {
         qty: ln.qty,
         unitPrice: ln.unitPrice ?? 0,
         discountPct: ln.discountPct,
-        taxRate: ln.taxRate ?? settings.vatRate ?? 15
+        taxRate: ln.taxRate ?? settings.vatRate ?? 15,
       }).incTax)}</td>
       <td><button type="button" class="btn warn" data-del="${idx}">×</button></td>
     </tr>`;
@@ -119,7 +124,7 @@ async function openDocForm(kind, docId) {
       qty: ln.qty,
       unitPrice: ln.unitPrice ?? 0,
       discountPct: ln.discountPct,
-      taxRate: ln.taxRate ?? settings.vatRate ?? 15
+      taxRate: ln.taxRate ?? settings.vatRate ?? 15,
     })));
     doc.totals = t;
     $("#sd_sub").textContent = currency(t.subTotal);
@@ -138,7 +143,7 @@ async function openDocForm(kind, docId) {
           qty: lines[idx].qty,
           unitPrice: lines[idx].unitPrice ?? 0,
           discountPct: lines[idx].discountPct,
-          taxRate: lines[idx].taxRate ?? settings.vatRate ?? 15
+          taxRate: lines[idx].taxRate ?? settings.vatRate ?? 15,
         }).incTax;
         const totalCell = tr.querySelector(".r");
         if (totalCell) totalCell.textContent = currency(t);
@@ -175,10 +180,10 @@ async function openDocForm(kind, docId) {
       qty: Number(qty) || 1,
       unitPrice: +it.sellPrice || 0,
       discountPct: 0,
-      taxRate: settings.vatRate ?? 15
+      taxRate: settings.vatRate ?? 15,
     });
-    draw(); // re-render table
-    recalc();
+    draw();   // re-render table
+    recalc(); // update totals
   }
 
   function findMatchesByCode(input) {
@@ -192,22 +197,18 @@ async function openDocForm(kind, docId) {
     );
   }
 
-  // Lazy-load the PDF module (try a few common paths)
+  // Lazy-load PDF module (tries common paths)
   async function ensurePdfModule() {
     if (typeof window.downloadInvoicePDFInto === "function" ||
-        typeof window.downloadInvoicePDF === "function") return true;
+        typeof window.getInvoiceHTML === "function") return true;
 
     if (window.__pdfModuleLoading) {
       await window.__pdfModuleLoading;
       return (typeof window.downloadInvoicePDFInto === "function" ||
-              typeof window.downloadInvoicePDF === "function");
+              typeof window.getInvoiceHTML === "function");
     }
 
-    const candidates = [
-      "60-pdf.js",
-      "/60-pdf.js",
-      "/split/60-pdf.js"
-    ];
+    const candidates = ["60-pdf.js", "/60-pdf.js", "/split/60-pdf.js"];
 
     window.__pdfModuleLoading = (async () => {
       for (const src of candidates) {
@@ -221,12 +222,10 @@ async function openDocForm(kind, docId) {
             document.head.appendChild(s);
           });
           if (typeof window.downloadInvoicePDFInto === "function" ||
-              typeof window.downloadInvoicePDF === "function") {
+              typeof window.getInvoiceHTML === "function") {
             return true;
           }
-        } catch (_) {
-          // try next
-        }
+        } catch (_) { /* try next */ }
       }
       return false;
     })();
@@ -235,20 +234,46 @@ async function openDocForm(kind, docId) {
     return ok === true;
   }
 
-  // Single, built-in item picker overlay (search by code/name/barcode)
+  // Fallback: print rendered HTML inside an overlay iframe (no popups needed)
+  function printHtmlInOverlay(html, title) {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;background:#fff;z-index:2147483647;";
+    overlay.innerHTML = `
+      <iframe id="__print_iframe" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
+      <button id="__print_close" style="
+        position:fixed;top:10px;right:10px;z-index:2147483648;
+        padding:6px 10px;border:0;border-radius:6px;background:#111;color:#fff;cursor:pointer;">
+        Close
+      </button>`;
+    document.body.appendChild(overlay);
+
+    const iframe = overlay.querySelector("#__print_iframe");
+    const close = overlay.querySelector("#__print_close");
+    close.addEventListener("click", () => overlay.remove());
+
+    const idoc = iframe.contentDocument;
+    try { idoc.open(); idoc.write(html); idoc.close(); } catch (e) { console.error(e); }
+
+    iframe.addEventListener("load", () => {
+      try {
+        iframe.contentWindow.document.title = title || "Document";
+        iframe.contentWindow.focus();
+        setTimeout(() => iframe.contentWindow.print(), 200);
+      } catch (e) { console.error(e); }
+    });
+  }
+
+  // Single in-dialog item picker (sits above the dialog and closes after add)
   function openItemPicker({ initialQuery = "" } = {}) {
     const host = document.getElementById("modal") || document.body;
 
     const wrap = document.createElement("div");
     wrap.className = "picker-overlay";
     wrap.style.cssText = `
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,.35);
-      display:flex; align-items:center; justify-content:center;
-      z-index: 2147483647;
-    `;
+      position:fixed; inset:0; background:rgba(0,0,0,.35);
+      display:flex; align-items:center; justify-content:center; z-index:2147483647;`;
     wrap.innerHTML = `
-      <div class="card" style="width:min(880px,94vw); max-height:80vh; overflow:auto; padding:12px; position:relative; z-index:2147483647;">
+      <div class="card" style="width:min(880px,94vw);max-height:80vh;overflow:auto;padding:12px;position:relative;z-index:2147483647;">
         <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
           <b>Find Item</b>
           <div class="row" style="gap:8px">
@@ -264,8 +289,7 @@ async function openDocForm(kind, docId) {
             <tbody id="ip_rows"></tbody>
           </table>
         </div>
-      </div>
-    `;
+      </div>`;
     host.appendChild(wrap);
 
     const rows = wrap.querySelector("#ip_rows");
@@ -301,27 +325,23 @@ async function openDocForm(kind, docId) {
         const getQty = () => Number(qtyEl?.value || 1) || 1;
 
         addBtn.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
+          e.preventDefault(); e.stopPropagation();
           addLineFromItem(it, getQty());
-          closePicker(); // close after add
+          closePicker();
         };
         tr.ondblclick = () => { addLineFromItem(it, getQty()); closePicker(); };
       });
 
       search.onkeydown = (e) => {
         if (e.key === "Enter" && filtered.length === 1) {
-          e.preventDefault();
-          e.stopPropagation();
+          e.preventDefault(); e.stopPropagation();
           addLineFromItem(filtered[0], 1);
-          closePicker(); // close after enter single match
+          closePicker();
         }
       };
     };
 
-    // close on backdrop
     wrap.addEventListener("click", (e) => { if (e.target === wrap) closePicker(); });
-
     btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closePicker(); };
     search.oninput = () => render(search.value);
 
@@ -330,71 +350,66 @@ async function openDocForm(kind, docId) {
     setTimeout(() => search.focus(), 0);
   }
 
-  // ---------- Render ----------
+  // ---------------------- draw ----------------------
   const draw = () => {
     body.innerHTML = `
-    <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-      <h3>${editing ? "View/Edit" : "New"} ${kind}</h3>
-      <div class="row" id="sd_actions" style="gap:8px">
-        <input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">
-        <button type="button" class="btn" id="sd_add">+ Add Item</button>
-        <button type="button" class="btn" id="sd_pdf">PDF</button>
-        ${editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
-        <button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
-        <button type="button" class="btn" id="sd_close">Close</button>
+      <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <h3>${editing ? "View/Edit" : "New"} ${kind}</h3>
+        <div class="row" id="sd_actions" style="gap:8px">
+          <input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">
+          <button type="button" class="btn" id="sd_add">+ Add Item</button>
+          <button type="button" class="btn" id="sd_pdf">PDF</button>
+          ${editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
+          <button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
+          <button type="button" class="btn" id="sd_close">Close</button>
+        </div>
       </div>
-    </div>
-    <div class="bd" data-lines-wrap>
-      <div class="form-grid" style="margin-bottom:10px">
-        <label class="input"><span>No</span><input id="sd_no" value="${doc.no}" disabled></label>
-        <label class="input"><span>Customer</span>
-          <select id="sd_cust">${custOpts}</select>
-        </label>
-        <label class="input"><span>Date</span><input id="sd_date" type="date" value="${(doc.dates?.issue || "").slice(0, 10)}"></label>
-        <label class="input"><span>Due</span><input id="sd_due" type="date" value="${(doc.dates?.due || "").slice(0, 10)}"></label>
-        <label class="input"><span>Warehouse</span><input id="sd_wh" value="${doc.warehouseId || "WH1"}"></label>
-        <label class="input" style="grid-column:1/-1"><span>Notes</span><input id="sd_notes" value="${doc.notes || ""}"></label>
-      </div>
+      <div class="bd">
+        <div class="form-grid" style="margin-bottom:10px">
+          <label class="input"><span>No</span><input id="sd_no" value="${doc.no}" disabled></label>
+          <label class="input"><span>Customer</span>
+            <select id="sd_cust">${custOpts}</select>
+          </label>
+          <label class="input"><span>Date</span><input id="sd_date" type="date" value="${(doc.dates?.issue || "").slice(0, 10)}"></label>
+          <label class="input"><span>Due</span><input id="sd_due" type="date" value="${(doc.dates?.due || "").slice(0, 10)}"></label>
+          <label class="input"><span>Warehouse</span><input id="sd_wh" value="${doc.warehouseId || "WH1"}"></label>
+          <label class="input" style="grid-column:1/-1"><span>Notes</span><input id="sd_notes" value="${doc.notes || ""}"></label>
+        </div>
 
-      <div style="overflow:auto;max-height:340px">
-        <table class="table lines">
-          <thead><tr><th>Item (ex VAT)</th><th>Qty</th><th>Unit Price</th><th>Disc %</th><th>VAT %</th><th>Total (inc)</th><th></th></tr></thead>
-          <tbody id="sd_rows" data-role="lines-tbody">
-            ${lines.map((ln, i) => renderLineRow(ln, i)).join("")}
-          </tbody>
-        </table>
-      </div>
+        <div style="overflow:auto;max-height:340px">
+          <table class="table lines">
+            <thead><tr><th>Item (ex VAT)</th><th>Qty</th><th>Unit Price</th><th>Disc %</th><th>VAT %</th><th>Total (inc)</th><th></th></tr></thead>
+            <tbody id="sd_rows">
+              ${lines.map((ln, i) => renderLineRow(ln, i)).join("")}
+            </tbody>
+          </table>
+        </div>
 
-      <div class="row" style="justify-content:flex-end;gap:18px;margin-top:10px">
-        <div><div class="sub">Sub Total</div><div id="sd_sub" class="r">${currency(doc.totals.subTotal)}</div></div>
-        <div><div class="sub">VAT</div><div id="sd_tax" class="r">${currency(doc.totals.tax)}</div></div>
-        <div><div class="sub"><b>Grand Total</b></div><div id="sd_tot" class="r"><b>${currency(doc.totals.grandTotal)}</b></div></div>
-      </div>
-    </div>`;
+        <div class="row" style="justify-content:flex-end;gap:18px;margin-top:10px">
+          <div><div class="sub">Sub Total</div><div id="sd_sub" class="r">${currency(doc.totals.subTotal)}</div></div>
+          <div><div class="sub">VAT</div><div id="sd_tax" class="r">${currency(doc.totals.tax)}</div></div>
+          <div><div class="sub"><b>Grand Total</b></div><div id="sd_tot" class="r"><b>${currency(doc.totals.grandTotal)}</b></div></div>
+        </div>
+      </div>`;
     m.showModal();
 
     const actions = $("#sd_actions");
 
     // Close
     actions.querySelector("#sd_close").addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      m.close();
+      e.preventDefault(); e.stopPropagation(); m.close();
     });
 
     // Add Item (open picker)
     actions.querySelector("#sd_add").addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      openItemPicker();
+      e.preventDefault(); e.stopPropagation(); openItemPicker();
     });
 
     // Direct code entry
     const codeEl = $("#sd_code");
     codeEl.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       const code = (codeEl.value || "").trim();
       if (!code) return;
       const matches = findMatchesByCode(code);
@@ -415,8 +430,7 @@ async function openDocForm(kind, docId) {
 
     // Save / Create
     actions.querySelector("#sd_save").addEventListener("click", async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
 
       recalc();
       await put("docs", doc);
@@ -438,47 +452,62 @@ async function openDocForm(kind, docId) {
       renderSales(kind);
     });
 
-    // PDF – open target window synchronously, then stream content
+    // PDF: try new tab; fallback to on-page iframe if popups blocked
     actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
 
-      // Open window first (user gesture) to avoid pop-up blockers
-      const w = window.open("", "_blank", "noopener,noreferrer");
-      if (!w) {
-        toast?.("Please allow popups for this site to view PDFs.");
-        return;
+      // Try to open a tab first (best UX)
+      let w = null;
+      try { w = window.open("", "_blank", "noopener,noreferrer"); } catch {}
+      if (w) {
+        try {
+          w.document.open();
+          w.document.write(`<!doctype html><meta charset="utf-8"><title>Generating…</title>
+            <style>body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#444}</style>
+            <div>Generating PDF…</div>`);
+          w.document.close();
+        } catch {}
       }
-      try {
-        w.document.open();
-        w.document.write(`<!doctype html><meta charset="utf-8"><title>Generating…</title>
-          <style>body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#444}</style>
-          <div>Generating PDF…</div>`);
-        w.document.close();
-      } catch (_) {}
 
       const ok = await ensurePdfModule();
-      if (!ok || typeof window.downloadInvoicePDFInto !== "function") {
+      if (!ok) {
         toast?.("PDF module not available (60-pdf.js)");
-        try { w.close(); } catch (_) {}
+        try { w?.close(); } catch {}
         return;
       }
 
+      // If a tab opened and we can stream into it, do that
+      if (w && typeof window.downloadInvoicePDFInto === "function") {
+        try {
+          await window.downloadInvoicePDFInto(w, doc.id, { doc, lines });
+          return;
+        } catch (err) {
+          console.error(err);
+          toast?.("PDF export failed");
+          try { w.close(); } catch {}
+          // fall through to iframe fallback
+        }
+      }
+
+      // Fallback: render in same tab via iframe overlay (works with pop-up blockers)
+      if (typeof window.getInvoiceHTML !== "function") {
+        toast?.("PDF render helper missing (getInvoiceHTML).");
+        return;
+      }
       try {
-        await window.downloadInvoicePDFInto(w, doc.id, { doc, lines });
+        const { title, html } = await window.getInvoiceHTML(doc.id, { doc, lines });
+        printHtmlInOverlay(html, title);
       } catch (err) {
         console.error(err);
-        toast?.("PDF export failed");
-        try { w.close(); } catch (_) {}
+        toast?.("PDF render failed");
       }
     });
 
-    // Delete
+    // Delete (with stock reverse for invoices)
     const delBtn = $("#sd_delete");
     if (delBtn) {
       delBtn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+        e.preventDefault(); e.stopPropagation();
         if (!confirm(`Delete this ${kind}?`)) return;
 
         if (kind === "INVOICE") {
@@ -494,7 +523,7 @@ async function openDocForm(kind, docId) {
               costImpact: -round2((item.costAvg || 0) * (+ln.qty || 0)),
               relatedDocId: doc.id,
               timestamp: nowISO(),
-              note: `Delete ${doc.no}`
+              note: `Delete ${doc.no}`,
             });
           }
         }
@@ -508,12 +537,14 @@ async function openDocForm(kind, docId) {
       });
     }
 
-    // Wire rows present after render
+    // Rows
     wireAllRows();
   };
 
   draw();
 }
 
-// Expose for router
+// Expose for router (compat aliases)
 window.renderSales = renderSales;
+window.renderSalesDocuments = renderSales; // some routers expect this
+window.renderSalesList = renderSales;      // and/or this
