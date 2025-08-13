@@ -2,7 +2,7 @@
 // Sales Documents (Quotes / Orders / Invoices)
 // Depends on: 01-db.js, 02-helpers.js ( $, $$, all, get, put, add, del,
 // whereIndex, nextDocNo, randId, nowISO, sumDoc, calcLineTotals, currency, toast )
-// NOTE: This version uses a single built-in item picker and a direct code entry.
+// Optional: adjustStockOnInvoice, downloadInvoicePDF/exportInvoicePDF/generateInvoicePDF
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE") {
@@ -21,7 +21,7 @@ async function renderSales(kind = "INVOICE") {
       <b>${kind}s</b>
       <div class="toolbar">
         <input id="d_search" placeholder="Search no / customer" style="min-width:240px">
-        <button class="btn primary" id="d_new">+ New ${kind}</button>
+        <button type="button" class="btn primary" id="d_new">+ New ${kind}</button>
       </div>
     </div>
     <div class="bd">
@@ -36,7 +36,7 @@ async function renderSales(kind = "INVOICE") {
               <td>${currency(d.totals?.subTotal || 0)}</td>
               <td>${currency(d.totals?.tax || 0)}</td>
               <td>${currency(d.totals?.grandTotal || 0)}</td>
-              <td><button class="btn" data-view="${d.id}">View</button></td>
+              <td><button type="button" class="btn" data-view="${d.id}">View</button></td>
             </tr>`).join("")}
         </tbody>
       </table>
@@ -57,7 +57,8 @@ async function renderSales(kind = "INVOICE") {
 async function openDocForm(kind, docId) {
   const editing = docId ? await get("docs", docId) : null;
   const customers = await all("customers");
-  const settings = (await get("settings", "app")).value;
+  const settingsRec = await get("settings", "app");
+  const settings = settingsRec?.value || {};
   const allItemsRaw = await all("items");
 
   // Normalize items for fast lookups and search
@@ -90,7 +91,7 @@ async function openDocForm(kind, docId) {
     return;
   }
 
-  const custOpts = customers
+  const custOpts = (customers || [])
     .map((c) => `<option value="${c.id}" ${c.id === doc.customerId ? "selected" : ""}>${c.name}</option>`)
     .join("");
 
@@ -100,14 +101,14 @@ async function openDocForm(kind, docId) {
       <td><input type="number" step="0.001" min="0" value="${ln.qty || 0}" data-edit="qty"></td>
       <td><input type="number" step="0.01"  min="0" value="${ln.unitPrice ?? 0}" data-edit="unitPrice"></td>
       <td><input type="number" step="0.01"  min="0" value="${ln.discountPct || 0}" data-edit="discountPct"></td>
-      <td><input type="number" step="0.01"  min="0" value="${ln.taxRate ?? settings.vatRate}" data-edit="taxRate"></td>
+      <td><input type="number" step="0.01"  min="0" value="${ln.taxRate ?? settings.vatRate ?? 15}" data-edit="taxRate"></td>
       <td class="r">${currency(calcLineTotals({
         qty: ln.qty,
         unitPrice: ln.unitPrice ?? 0,
         discountPct: ln.discountPct,
-        taxRate: ln.taxRate ?? settings.vatRate,
+        taxRate: ln.taxRate ?? settings.vatRate ?? 15,
       }).incTax)}</td>
-      <td><button class="btn warn" data-del="${idx}">×</button></td>
+      <td><button type="button" class="btn warn" data-del="${idx}">×</button></td>
     </tr>`;
 
   const recalc = () => {
@@ -115,7 +116,7 @@ async function openDocForm(kind, docId) {
       qty: ln.qty,
       unitPrice: ln.unitPrice ?? 0,
       discountPct: ln.discountPct,
-      taxRate: ln.taxRate ?? settings.vatRate,
+      taxRate: ln.taxRate ?? settings.vatRate ?? 15,
     })));
     doc.totals = t;
     $("#sd_sub").textContent = currency(t.subTotal);
@@ -134,7 +135,7 @@ async function openDocForm(kind, docId) {
           qty: lines[idx].qty,
           unitPrice: lines[idx].unitPrice ?? 0,
           discountPct: lines[idx].discountPct,
-          taxRate: lines[idx].taxRate ?? settings.vatRate,
+          taxRate: lines[idx].taxRate ?? settings.vatRate ?? 15,
         }).incTax;
         const totalCell = tr.querySelector(".r");
         if (totalCell) totalCell.textContent = currency(t);
@@ -171,7 +172,7 @@ async function openDocForm(kind, docId) {
       qty: Number(qty) || 1,
       unitPrice: +it.sellPrice || 0,
       discountPct: 0,
-      taxRate: settings.vatRate,
+      taxRate: settings.vatRate ?? 15,
     });
     draw();
     recalc();
@@ -188,7 +189,7 @@ async function openDocForm(kind, docId) {
     );
   }
 
-  // Single, built-in item picker overlay (search by code/name, Add buttons)
+  // Single, built-in item picker overlay (search by code/name/barcode, Add buttons)
   function openItemPicker({ initialQuery = "" } = {}) {
     const wrap = document.createElement("div");
     wrap.style.cssText = `
@@ -200,7 +201,7 @@ async function openDocForm(kind, docId) {
           <b>Find Item</b>
           <div class="row" style="gap:8px">
             <input id="ip_search" placeholder="Search code, name, or barcode" style="min-width:320px">
-            <button class="btn" id="ip_done">Done</button>
+            <button type="button" class="btn" id="ip_done">Done</button>
           </div>
         </div>
         <div class="bd">
@@ -233,7 +234,7 @@ async function openDocForm(kind, docId) {
           <td>${it.name}</td>
           <td class="r">${currency(it.sellPrice)}</td>
           <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
-          <td class="r"><button class="btn" data-add>Add</button></td>
+          <td class="r"><button type="button" class="btn" data-add>Add</button></td>
         </tr>
       `).join("") || `<tr><td colspan="5" class="muted">No matches</td></tr>`;
 
@@ -245,19 +246,20 @@ async function openDocForm(kind, docId) {
         const addBtn = tr.querySelector("[data-add]");
         const getQty = () => Number(qtyEl?.value || 1) || 1;
 
-        addBtn.onclick = () => addLineFromItem(it, getQty());
+        addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); addLineFromItem(it, getQty()); };
         tr.ondblclick = () => addLineFromItem(it, getQty());
       });
 
       // Enter to add when exactly one row visible
       search.onkeydown = (e) => {
         if (e.key === "Enter" && filtered.length === 1) {
+          e.preventDefault(); e.stopPropagation();
           addLineFromItem(filtered[0], 1);
         }
       };
     };
 
-    btnDone.onclick = () => wrap.remove();
+    btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrap.remove(); };
     search.oninput = () => render(search.value);
     render(initialQuery);
     search.value = initialQuery;
@@ -268,18 +270,19 @@ async function openDocForm(kind, docId) {
   const draw = () => {
     const hasPdf =
       (typeof window.downloadInvoicePDF === "function") ||
-      (typeof window.exportInvoicePDF === "function");
+      (typeof window.exportInvoicePDF === "function") ||
+      (typeof window.generateInvoicePDF === "function");
 
     body.innerHTML = `
     <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
       <h3>${editing ? "View/Edit" : "New"} ${kind}</h3>
-      <div class="row" style="gap:8px">
+      <div class="row" id="sd_actions" style="gap:8px">
         <input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">
-        <button class="btn" id="sd_add">+ Add Item</button>
-        ${editing && hasPdf ? `<button class="btn" id="sd_pdf">PDF</button>` : ""}
-        ${editing ? `<button class="btn warn" id="sd_delete">Delete</button>` : ""}
-        <button class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
-        <button class="btn" onclick="document.getElementById('modal').close()">Close</button>
+        <button type="button" class="btn" id="sd_add">+ Add Item</button>
+        ${hasPdf ? `<button type="button" class="btn" id="sd_pdf">PDF</button>` : ""}
+        ${editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
+        <button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
+        <button type="button" class="btn" id="sd_close">Close</button>
       </div>
     </div>
     <div class="bd" data-lines-wrap>
@@ -311,17 +314,24 @@ async function openDocForm(kind, docId) {
     </div>`;
     m.showModal();
 
-    // Header inputs
-    $("#sd_cust").onchange = () => (doc.customerId = $("#sd_cust").value);
-    $("#sd_date").onchange = () => (doc.dates.issue = $("#sd_date").value);
-    $("#sd_due").onchange = () => (doc.dates.due = $("#sd_due").value);
-    $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
-    $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
+    // ---------- Scoped action handlers (prevent bubbling to any global .btn handler) ----------
+    const actions = $("#sd_actions");
 
-    // Direct code entry (Enter to add)
+    // Close
+    actions.querySelector("#sd_close").addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation(); m.close();
+    });
+
+    // Add Item — open single picker
+    actions.querySelector("#sd_add").addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation(); openItemPicker();
+    });
+
+    // Direct code entry (Enter to add or open picker prefilled)
     const codeEl = $("#sd_code");
-    codeEl.onkeydown = (e) => {
+    codeEl.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
+      e.preventDefault(); e.stopPropagation();
       const code = (codeEl.value || "").trim();
       if (!code) return;
       const matches = findMatchesByCode(code);
@@ -329,17 +339,21 @@ async function openDocForm(kind, docId) {
         addLineFromItem(matches[0], 1);
         codeEl.value = "";
       } else {
-        // open picker with query prefilled (handles 0 or many)
         openItemPicker({ initialQuery: code });
-        // leave the code in the box so user can tweak if they want
       }
-    };
+    });
 
-    // Open the single picker for search-by-name/code
-    $("#sd_add").onclick = () => openItemPicker();
+    // Header inputs
+    $("#sd_cust").onchange = () => (doc.customerId = $("#sd_cust").value);
+    $("#sd_date").onchange = () => (doc.dates.issue = $("#sd_date").value);
+    $("#sd_due").onchange = () => (doc.dates.due = $("#sd_due").value);
+    $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
+    $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
 
-    // Save
-    $("#sd_save").onclick = async () => {
+    // Save / Create
+    actions.querySelector("#sd_save").addEventListener("click", async (e) => {
+      e.preventDefault(); e.stopPropagation();
+
       recalc();
       await put("docs", doc);
 
@@ -351,54 +365,35 @@ async function openDocForm(kind, docId) {
         ln.docId = doc.id;
         await put("lines", ln);
       }
-      if (kind === "INVOICE") await adjustStockOnInvoice(doc, lines);
+      if (kind === "INVOICE" && typeof adjustStockOnInvoice === "function") {
+        await adjustStockOnInvoice(doc, lines);
+      }
+
       toast(editing ? `${kind} updated` : `${kind} created`);
+
+      // Offer PDF immediately after save if available
+      const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF || window.generateInvoicePDF;
+      if (typeof pdfFn === "function" && confirm("Open PDF now?")) {
+        try { await pdfFn(doc.id, { doc, lines }); }
+        catch (err) { console.error(err); toast?.("PDF export failed"); }
+      }
+
       m.close();
       renderSales(kind);
-    };
+    });
 
-    // PDF (guarded)
+    // PDF (available even for unsaved docs if function supports it)
     if ($("#sd_pdf")) {
-      $("#sd_pdf").onclick = async () => {
-        const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF;
+      $("#sd_pdf").addEventListener("click", async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF || window.generateInvoicePDF;
         if (typeof pdfFn !== "function") {
-          if (typeof toast === "function") toast("PDF export not available");
+          toast?.("PDF export not available");
           return;
         }
-        await pdfFn(doc.id, { doc, lines });
-      };
-    }
-
-    // Delete
-    if ($("#sd_delete")) {
-      $("#sd_delete").onclick = async () => {
-        if (!confirm(`Delete this ${kind}?`)) return;
-
-        // Reverse stock if invoice
-        if (kind === "INVOICE") {
-          for (const ln of lines) {
-            const item = await get("items", ln.itemId);
-            if (!item || item.nonStock) continue;
-            await add("movements", {
-              id: randId(),
-              itemId: item.id,
-              warehouseId: doc.warehouseId || "WH1",
-              type: "SALE_REVERSE",
-              qtyDelta: +ln.qty,
-              costImpact: -round2((item.costAvg || 0) * (+ln.qty || 0)),
-              relatedDocId: doc.id,
-              timestamp: nowISO(),
-              note: `Delete ${doc.no}`,
-            });
-          }
-        }
-        const exLines = await whereIndex("lines", "by_doc", doc.id);
-        await Promise.all(exLines.map((l) => del("lines", l.id)));
-        await del("docs", doc.id);
-        toast(`${kind} deleted`);
-        m.close();
-        renderSales(kind);
-      };
+        try { await pdfFn(doc.id, { doc, lines }); }
+        catch (err) { console.error(err); toast?.("PDF export failed"); }
+      });
     }
 
     // Wire rows present after render
