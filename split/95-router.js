@@ -1,22 +1,30 @@
 // ============================================================================
 // Router (hash-based)
-// Depends on: page renderers like renderDashboard(), renderCustomers(), etc.
+// Depends on: page renderers exposed on window, e.g. window.renderDashboard()
+// Robust against load order by resolving function names at runtime.
+// ============================================================================
 
 (function () {
+  // Map paths to global function names (resolve at call time)
   const ROUTES = {
-    "/": renderDashboard,
-    "/dashboard": renderDashboard,
-    "/customers": renderCustomers,
-    "/suppliers": renderSuppliers,
-    "/items": renderItems,
-    "/purchases": renderPurchases,
-    "/quotes": renderQuotes,     
-    "/orders": renderOrders,    
-    "/invoices": renderInvoices,
-    "/layouts": renderLayouts,
-    "/payments": renderPayments,
-    "/settings": renderSettings,
-    "/about": renderAbout,
+    "/": "renderDashboard",
+    "/dashboard": "renderDashboard",
+    "/customers": "renderCustomers",
+    "/suppliers": "renderSuppliers",
+    "/items": "renderItems",
+    "/purchases": "renderPurchases",
+
+    // Sales
+    "/quotes": "renderQuotes",
+    "/quotes-history": "renderQuotesHistory",
+    "/orders": "renderOrders",
+    "/orders-history": "renderOrdersHistory",
+    "/invoices": "renderInvoices",
+
+    "/layouts": "renderLayouts",
+    "/payments": "renderPayments",
+    "/settings": "renderSettings",
+    "/about": "renderAbout",
   };
 
   function getPath() {
@@ -26,9 +34,15 @@
 
   async function renderRouteFromHash() {
     const path = getPath();
-    const fn = ROUTES[path] || ROUTES["/dashboard"];
+    const fnName = ROUTES[path] || "renderDashboard";
     try {
-      await fn();
+      const fn = window[fnName];
+      if (typeof fn === "function") {
+        await fn();
+      } else {
+        console.warn(`Route "${path}" -> ${fnName} not loaded yet; falling back to dashboard.`);
+        await window.renderDashboard?.();
+      }
     } catch (e) {
       console.error("Route render failed:", e);
       const v = document.getElementById("view");
