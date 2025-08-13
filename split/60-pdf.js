@@ -202,6 +202,13 @@
 
  // --- Public API -----------------------------------------------------------
 
+  
+async function getInvoiceHTML(docId, ctx) {
+  const data = await loadContext(docId, ctx);
+  return buildHTML(data); // -> { title, html }
+}
+window.getInvoiceHTML = getInvoiceHTML;
+
 // Write into a window you already opened (prevents popup blockers)
 async function downloadInvoicePDFInto(targetWindow, docId, ctx) {
   const w = targetWindow;
