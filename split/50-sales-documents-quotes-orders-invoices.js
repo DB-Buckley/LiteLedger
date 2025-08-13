@@ -287,137 +287,164 @@ function openItemPicker({ initialQuery = "" } = {}) {
 
   // ---------- Render ----------
   const draw = () => {
-    const hasPdf =
-      (typeof window.downloadInvoicePDF === "function") ||
-      (typeof window.exportInvoicePDF === "function") ||
-      (typeof window.generateInvoicePDF === "function");
-
-    body.innerHTML = `
-    <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-      <h3>${editing ? "View/Edit" : "New"} ${kind}</h3>
-      <div class="row" id="sd_actions" style="gap:8px">
-        <input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">
-        <button type="button" class="btn" id="sd_add">+ Add Item</button>
-        ${hasPdf ? `<button type="button" class="btn" id="sd_pdf">PDF</button>` : ""}
-        ${editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
-        <button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
-        <button type="button" class="btn" id="sd_close">Close</button>
-      </div>
+  body.innerHTML = `
+  <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+    <h3>${editing ? "View/Edit" : "New"} ${kind}</h3>
+    <div class="row" id="sd_actions" style="gap:8px">
+      <input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">
+      <button type="button" class="btn" id="sd_add">+ Add Item</button>
+      <button type="button" class="btn" id="sd_pdf">PDF</button>
+      ${editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
+      <button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
+      <button type="button" class="btn" id="sd_close">Close</button>
     </div>
-    <div class="bd" data-lines-wrap>
-      <div class="form-grid" style="margin-bottom:10px">
-        <label class="input"><span>No</span><input id="sd_no" value="${doc.no}" disabled></label>
-        <label class="input"><span>Customer</span>
-          <select id="sd_cust">${custOpts}</select>
-        </label>
-        <label class="input"><span>Date</span><input id="sd_date" type="date" value="${(doc.dates?.issue || "").slice(0, 10)}"></label>
-        <label class="input"><span>Due</span><input id="sd_due" type="date" value="${(doc.dates?.due || "").slice(0, 10)}"></label>
-        <label class="input"><span>Warehouse</span><input id="sd_wh" value="${doc.warehouseId || "WH1"}"></label>
-        <label class="input" style="grid-column:1/-1"><span>Notes</span><input id="sd_notes" value="${doc.notes || ""}"></label>
-      </div>
+  </div>
+  <div class="bd" data-lines-wrap>
+    <div class="form-grid" style="margin-bottom:10px">
+      <label class="input"><span>No</span><input id="sd_no" value="${doc.no}" disabled></label>
+      <label class="input"><span>Customer</span>
+        <select id="sd_cust">${custOpts}</select>
+      </label>
+      <label class="input"><span>Date</span><input id="sd_date" type="date" value="${(doc.dates?.issue || "").slice(0, 10)}"></label>
+      <label class="input"><span>Due</span><input id="sd_due" type="date" value="${(doc.dates?.due || "").slice(0, 10)}"></label>
+      <label class="input"><span>Warehouse</span><input id="sd_wh" value="${doc.warehouseId || "WH1"}"></label>
+      <label class="input" style="grid-column:1/-1"><span>Notes</span><input id="sd_notes" value="${doc.notes || ""}"></label>
+    </div>
 
-      <div style="overflow:auto;max-height:340px">
-        <table class="table lines">
-          <thead><tr><th>Item (ex VAT)</th><th>Qty</th><th>Unit Price</th><th>Disc %</th><th>VAT %</th><th>Total (inc)</th><th></th></tr></thead>
-          <tbody id="sd_rows" data-role="lines-tbody">
-            ${lines.map((ln, i) => renderLineRow(ln, i)).join("")}
-          </tbody>
-        </table>
-      </div>
+    <div style="overflow:auto;max-height:340px">
+      <table class="table lines">
+        <thead><tr><th>Item (ex VAT)</th><th>Qty</th><th>Unit Price</th><th>Disc %</th><th>VAT %</th><th>Total (inc)</th><th></th></tr></thead>
+        <tbody id="sd_rows" data-role="lines-tbody">
+          ${lines.map((ln, i) => renderLineRow(ln, i)).join("")}
+        </tbody>
+      </table>
+    </div>
 
-      <div class="row" style="justify-content:flex-end;gap:18px;margin-top:10px">
-        <div><div class="sub">Sub Total</div><div id="sd_sub" class="r">${currency(doc.totals.subTotal)}</div></div>
-        <div><div class="sub">VAT</div><div id="sd_tax" class="r">${currency(doc.totals.tax)}</div></div>
-        <div><div class="sub"><b>Grand Total</b></div><div id="sd_tot" class="r"><b>${currency(doc.totals.grandTotal)}</b></div></div>
-      </div>
-    </div>`;
-    m.showModal();
+    <div class="row" style="justify-content:flex-end;gap:18px;margin-top:10px">
+      <div><div class="sub">Sub Total</div><div id="sd_sub" class="r">${currency(doc.totals.subTotal)}</div></div>
+      <div><div class="sub">VAT</div><div id="sd_tax" class="r">${currency(doc.totals.tax)}</div></div>
+      <div><div class="sub"><b>Grand Total</b></div><div id="sd_tot" class="r"><b>${currency(doc.totals.grandTotal)}</b></div></div>
+    </div>
+  </div>`;
+  m.showModal();
 
-    // ---------- Scoped action handlers (prevent bubbling to any global .btn handler) ----------
-    const actions = $("#sd_actions");
+  const actions = $("#sd_actions");
 
-    // Close
-    actions.querySelector("#sd_close").addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation(); m.close();
-    });
+  // Close
+  actions.querySelector("#sd_close").addEventListener("click", (e) => {
+    e.preventDefault(); e.stopPropagation(); m.close();
+  });
 
-    // Add Item — open single picker
-    actions.querySelector("#sd_add").addEventListener("click", (e) => {
-      e.preventDefault(); e.stopPropagation(); openItemPicker();
-    });
+  // Add Item (opens our single in-dialog picker)
+  actions.querySelector("#sd_add").addEventListener("click", (e) => {
+    e.preventDefault(); e.stopPropagation(); openItemPicker();
+  });
 
-    // Direct code entry (Enter to add or open picker prefilled)
-    const codeEl = $("#sd_code");
-    codeEl.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter") return;
-      e.preventDefault(); e.stopPropagation();
-      const code = (codeEl.value || "").trim();
-      if (!code) return;
-      const matches = findMatchesByCode(code);
-      if (matches.length === 1) {
-        addLineFromItem(matches[0], 1);
-        codeEl.value = "";
-      } else {
-        openItemPicker({ initialQuery: code });
-      }
-    });
+  // Code entry (Enter to add or open picker prefilled)
+  const codeEl = $("#sd_code");
+  codeEl.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault(); e.stopPropagation();
+    const code = (codeEl.value || "").trim();
+    if (!code) return;
+    const matches = findMatchesByCode(code);
+    if (matches.length === 1) {
+      addLineFromItem(matches[0], 1);
+      codeEl.value = "";
+    } else {
+      openItemPicker({ initialQuery: code });
+    }
+  });
 
-    // Header inputs
-    $("#sd_cust").onchange = () => (doc.customerId = $("#sd_cust").value);
-    $("#sd_date").onchange = () => (doc.dates.issue = $("#sd_date").value);
-    $("#sd_due").onchange = () => (doc.dates.due = $("#sd_due").value);
-    $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
-    $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
+  // Header inputs
+  $("#sd_cust").onchange = () => (doc.customerId = $("#sd_cust").value);
+  $("#sd_date").onchange = () => (doc.dates.issue = $("#sd_date").value);
+  $("#sd_due").onchange = () => (doc.dates.due = $("#sd_due").value);
+  $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
+  $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
 
-    // Save / Create
-    actions.querySelector("#sd_save").addEventListener("click", async (e) => {
-      e.preventDefault(); e.stopPropagation();
+  // Save / Create
+  actions.querySelector("#sd_save").addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
 
-      recalc();
-      await put("docs", doc);
+    recalc();
+    await put("docs", doc);
 
-      if (editing) {
-        const existing = await whereIndex("lines", "by_doc", doc.id);
-        await Promise.all(existing.map((ln) => del("lines", ln.id)));
-      }
-      for (const ln of lines) {
-        ln.docId = doc.id;
-        await put("lines", ln);
-      }
-      if (kind === "INVOICE" && typeof adjustStockOnInvoice === "function") {
-        await adjustStockOnInvoice(doc, lines);
-      }
+    if (editing) {
+      const existing = await whereIndex("lines", "by_doc", doc.id);
+      await Promise.all(existing.map((ln) => del("lines", ln.id)));
+    }
+    for (const ln of lines) {
+      ln.docId = doc.id;
+      await put("lines", ln);
+    }
+    if (kind === "INVOICE" && typeof adjustStockOnInvoice === "function") {
+      await adjustStockOnInvoice(doc, lines);
+    }
 
-      toast(editing ? `${kind} updated` : `${kind} created`);
+    toast(editing ? `${kind} updated` : `${kind} created`);
 
-      // Offer PDF immediately after save if available
+    // Offer PDF immediately after save
+    if (await ensurePdfModule()) {
       const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF || window.generateInvoicePDF;
       if (typeof pdfFn === "function" && confirm("Open PDF now?")) {
         try { await pdfFn(doc.id, { doc, lines }); }
         catch (err) { console.error(err); toast?.("PDF export failed"); }
       }
+    }
 
+    m.close();
+    renderSales(kind);
+  });
+
+  // PDF (always shown; we lazy-load the module on demand)
+  actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const ok = await ensurePdfModule();
+    if (!ok) { toast?.("PDF module not available (60-pdf.js)."); return; }
+    const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF || window.generateInvoicePDF;
+    if (typeof pdfFn !== "function") { toast?.("PDF export not available"); return; }
+    try { await pdfFn(doc.id, { doc, lines }); }
+    catch (err) { console.error(err); toast?.("PDF export failed"); }
+  });
+
+  // DELETE (now wired)
+  const delBtn = $("#sd_delete");
+  if (delBtn) {
+    delBtn.addEventListener("click", async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (!confirm(`Delete this ${kind}?`)) return;
+
+      if (kind === "INVOICE") {
+        for (const ln of lines) {
+          const item = await get("items", ln.itemId);
+          if (!item || item.nonStock) continue;
+          await add("movements", {
+            id: randId(),
+            itemId: item.id,
+            warehouseId: doc.warehouseId || "WH1",
+            type: "SALE_REVERSE",
+            qtyDelta: +ln.qty,
+            costImpact: -round2((item.costAvg || 0) * (+ln.qty || 0)),
+            relatedDocId: doc.id,
+            timestamp: nowISO(),
+            note: `Delete ${doc.no}`,
+          });
+        }
+      }
+      const exLines = await whereIndex("lines", "by_doc", doc.id);
+      await Promise.all(exLines.map((l) => del("lines", l.id)));
+      await del("docs", doc.id);
+
+      toast(`${kind} deleted`);
       m.close();
       renderSales(kind);
     });
+  }
 
-    // PDF (available even for unsaved docs if function supports it)
-    if ($("#sd_pdf")) {
-      $("#sd_pdf").addEventListener("click", async (e) => {
-        e.preventDefault(); e.stopPropagation();
-        const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF || window.generateInvoicePDF;
-        if (typeof pdfFn !== "function") {
-          toast?.("PDF export not available");
-          return;
-        }
-        try { await pdfFn(doc.id, { doc, lines }); }
-        catch (err) { console.error(err); toast?.("PDF export failed"); }
-      });
-    }
-
-    // Wire rows present after render
-    wireAllRows();
-  };
+  // Wire rows present after render
+  wireAllRows();
+};
 
   draw();
 }
