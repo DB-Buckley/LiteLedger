@@ -200,23 +200,40 @@
     return { title, html };
   }
 
-  // --- Public API -----------------------------------------------------------
-  async function downloadInvoicePDF(docId, ctx) {
-    // Open the target window immediately so popup blockers don't kill it
-    const w = openShellWindow("Generating…");
-    try {
-      const data = await loadContext(docId, ctx);
-      const { title, html } = buildHTML(data);
-      writeHTML(w, html, title);
-    } catch (err) {
-      console.error("[PDF]", err);
-      writeError(w, err?.message || String(err));
-    }
-  }
-  async function exportInvoicePDF(docId, ctx) { return downloadInvoicePDF(docId, ctx); }
-  async function generateInvoicePDF(docId, ctx) { return downloadInvoicePDF(docId, ctx); }
+ // --- Public API -----------------------------------------------------------
 
-  window.downloadInvoicePDF  = downloadInvoicePDF;
-  window.exportInvoicePDF    = exportInvoicePDF;
-  window.generateInvoicePDF  = generateInvoicePDF;
+// Write into a window you already opened (prevents popup blockers)
+async function downloadInvoicePDFInto(targetWindow, docId, ctx) {
+  const w = targetWindow;
+  if (!w) throw new Error("No target window");
+  try {
+    const data = await loadContext(docId, ctx);
+    const { title, html } = buildHTML(data);
+    writeHTML(w, html, title);
+  } catch (err) {
+    console.error("[PDF]", err);
+    writeError(w, err?.message || String(err));
+  }
+}
+
+// Classic API (will open its own window)
+async function downloadInvoicePDF(docId, ctx) {
+  const w = openShellWindow("Generating…");
+  try {
+    const data = await loadContext(docId, ctx);
+    const { title, html } = buildHTML(data);
+    writeHTML(w, html, title);
+  } catch (err) {
+    console.error("[PDF]", err);
+    writeError(w, err?.message || String(err));
+  }
+}
+async function exportInvoicePDF(docId, ctx)  { return downloadInvoicePDF(docId, ctx); }
+async function generateInvoicePDF(docId, ctx){ return downloadInvoicePDF(docId, ctx); }
+
+window.downloadInvoicePDFInto = downloadInvoicePDFInto;
+window.downloadInvoicePDF     = downloadInvoicePDF;
+window.exportInvoicePDF       = exportInvoicePDF;
+window.generateInvoicePDF     = generateInvoicePDF;
+
 })();
