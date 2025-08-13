@@ -1,0 +1,98 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LiteLedger — CRM (MVP)</title>
+
+  <!-- PWA / theme -->
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="favicon.png" type="image/svg+xml">
+  <!-- iOS PWA support -->
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <!-- Styles -->
+  <link rel="preload" href="styles.css" as="style">
+  <link rel="stylesheet" href="styles.css">
+
+  <!-- pdf-lib (for PDFs); app has a fallback if this fails -->
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js" defer></script>
+
+  <!-- Core & utilities (deferred, order preserved) -->
+  <script src="split/01-db.js" defer></script>
+  <script src="split/50-utilities.js" defer></script>
+  <script src="split/02-helpers.js" defer></script>
+  <script src="split/03-bootstrap.js" defer></script>
+
+  <!-- Features -->
+  <script src="split/10-dashboard.js" defer></script>
+  <script src="split/20-customers.js" defer></script>
+  <script src="split/30-suppliers.js" defer></script>
+  <script src="split/40-items-2.js" defer></script>
+  <script src="split/50-purchases.js" defer></script>
+  <script src="split/50-company-banner.js" defer></script>
+  <script src="split/55-company-banner-mount.js" defer></script>
+  <script src="split/50-integrity-guards.js" defer></script>
+  <script src="split/50-sales-documents-quotes-orders-invoices.js" defer></script>
+  <script src="split/52-sales-routes.js" defer></script>
+  <script src="split/60-layouts.js" defer></script>
+  <script src="split/70-payments.js" defer></script>
+  <script src="split/80-settings.js" defer></script>
+  <script src="split/90-about.js" defer></script>
+
+  <!-- Shell -->
+  <script src="split/95-router.js" defer></script>
+  <script src="split/98-pwa.js" defer></script>
+  <script src="split/99-init.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <div class="logo"></div>
+        <span>LiteLedger</span>
+        <span class="pill">MVP</span>
+      </div>
+      <div class="pill" id="offlineBadge" hidden>Offline</div>
+      <nav>
+        <button class="btn" id="btnCustomize">Customize</button>
+        <button class="btn" id="btnAddQuick">+ Quick Add</button>
+        <button class="btn" id="btnBackup">Backup</button>
+        <button class="btn" id="btnRestore">Restore</button>
+        <button class="btn" id="btnInstall" hidden>Install</button>
+      </nav>
+    </header>
+
+    <main>
+      <aside>
+        <div class="nav">
+          <a href="#/dashboard" class="active">📊 Dashboard</a>
+          <a href="#/quotes">Quotes</a>
+          <a href="#/orders">Orders</a>
+          <a href="#/invoices">Invoices</a>
+          <a href="#/customers">👥 Customers</a>
+          <a href="#/suppliers">🏢 Suppliers</a>
+          <a href="#/purchases">🛒 Purchases</a>
+          <a href="#/items">📦 Items</a>
+          <a href="#/payments">💳 Payments & Statements</a>
+          <a href="#/settings">⚙️ Settings</a>
+          <a href="#/about">ℹ️ About</a>
+        </div>
+      </aside>
+      <section class="content">
+        <div id="view"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modals -->
+  <dialog id="modal" class="modal">
+    <form method="dialog"><div id="modalBody"></div></form>
+  </dialog>
+  <div id="toast" class="toast" hidden></div>
+</body>
+</html>
