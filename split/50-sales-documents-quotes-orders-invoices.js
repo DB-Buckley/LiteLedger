@@ -363,6 +363,7 @@ async function openDocForm(kind, docId) {
           <input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">
           <button type="button" class="btn" id="sd_add">+ Add Item</button>
           <button type="button" class="btn" id="sd_pdf">PDF</button>
+          ${editing && kind !== "INVOICE" ? `<button type="button" class="btn" id="sd_convert">Convert → Invoice</button>` : ""}
           ${editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
           <button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>
           <button type="button" class="btn" id="sd_close">Close</button>
@@ -473,6 +474,79 @@ async function openDocForm(kind, docId) {
         toast?.("PDF render failed");
       }
     });
+
+    // Convert → Invoice (for QUOTE / ORDER)
+    const convertBtn = $("#sd_convert");
+    if (convertBtn) {
+      convertBtn.addEventListener("click", async (e) => {
+        e.preventDefault(); e.stopPropagation();
+
+        // If already converted, open the target
+        if (doc.convertedToId) {
+          try {
+            const target = await get("docs", doc.convertedToId);
+            if (target) { m.close(); openDocForm("INVOICE", target.id); return; }
+          } catch (_) {}
+        }
+
+        if (!confirm(`Convert this ${kind.toLowerCase()} to an INVOICE?`)) return;
+
+        const newId = randId();
+        const invNo = await nextDocNo("INVOICE");
+        const issue = nowISO().slice(0, 10);
+        let due = issue;
+        try {
+          const cust = doc.customerId ? await get("customers", doc.customerId) : null;
+          const days = Number(cust?.termsDays) || 0;
+          if (days > 0) {
+            const d = new Date(issue);
+            d.setDate(d.getDate() + days);
+            due = d.toISOString().slice(0, 10);
+          }
+        } catch (_) {}
+
+        const inv = {
+          id: newId,
+          type: "INVOICE",
+          no: invNo,
+          customerId: doc.customerId,
+          warehouseId: doc.warehouseId || "WH1",
+          dates: { issue, due },
+          totals: { subTotal: 0, tax: 0, grandTotal: 0 },
+          notes: doc.notes || "",
+          createdAt: nowISO(),
+          sourceId: doc.id,
+          sourceType: doc.type,
+        };
+        await put("docs", inv);
+
+        // clone lines
+        for (const ln of lines) {
+          const clone = { ...ln, id: randId(), docId: newId };
+          await put("lines", clone);
+        }
+
+        // compute totals and update invoice
+        const invLines = await whereIndex("lines", "by_doc", newId);
+        const totals = sumDoc(invLines.map(l => ({
+          qty: l.qty,
+          unitPrice: l.unitPrice ?? 0,
+          discountPct: l.discountPct,
+          taxRate: l.taxRate ?? settings.vatRate ?? 15,
+        })));
+        inv.totals = totals;
+        await put("docs", inv);
+
+        // mark source doc as converted
+        doc.convertedToId = newId;
+        doc.status = "CONVERTED";
+        await put("docs", doc);
+
+        toast("Invoice created from " + kind);
+        m.close();
+        openDocForm("INVOICE", newId); // let user review & Save (will post stock)
+      });
+    }
 
     // Delete (with stock reverse for invoices)
     const delBtn = $("#sd_delete");
