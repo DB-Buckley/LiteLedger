@@ -191,24 +191,20 @@ async function openDocForm(kind, docId) {
 
   // Single, built-in item picker overlay (search by code/name/barcode, Add buttons)
 // MOUNT INSIDE #modal (dialog) so it sits on the same top layer and appears above.
+// Replace your existing openItemPicker(...) with this version
 function openItemPicker({ initialQuery = "" } = {}) {
-  // Host inside the open dialog if present, else fall back to body.
   const host = document.getElementById("modal") || document.body;
 
   const wrap = document.createElement("div");
   wrap.className = "picker-overlay";
-  // VERY high z-index + fixed so it overlays modal content. Since it's inside
-  // the dialog element, it's on the same top layer and will be on top.
   wrap.style.cssText = `
-    position: fixed; inset: 0; 
+    position: fixed; inset: 0;
     background: rgba(0,0,0,.35);
-    display:flex; align-items:center; justify-content:center; 
-    z-index: 2147483647; /* max-int-ish */
+    display:flex; align-items:center; justify-content:center;
+    z-index: 2147483647;
   `;
   wrap.innerHTML = `
-    <div class="card" style="
-      width:min(880px,94vw); max-height:80vh; overflow:auto; padding:12px;
-      position: relative; z-index: 2147483647;">
+    <div class="card" style="width:min(880px,94vw); max-height:80vh; overflow:auto; padding:12px; position:relative; z-index:2147483647;">
       <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <b>Find Item</b>
         <div class="row" style="gap:8px">
@@ -226,13 +222,12 @@ function openItemPicker({ initialQuery = "" } = {}) {
       </div>
     </div>
   `;
-
-  // Append to the dialog (top layer) or body fallback
   host.appendChild(wrap);
 
   const rows = wrap.querySelector("#ip_rows");
   const search = wrap.querySelector("#ip_search");
   const btnDone = wrap.querySelector("#ip_done");
+  const closePicker = () => wrap.remove();
 
   const render = (q = "") => {
     const qq = q.toLowerCase().trim();
@@ -260,24 +255,27 @@ function openItemPicker({ initialQuery = "" } = {}) {
       const addBtn = tr.querySelector("[data-add]");
       const getQty = () => Number(qtyEl?.value || 1) || 1;
 
-      addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); addLineFromItem(it, getQty()); };
-      tr.ondblclick = () => addLineFromItem(it, getQty());
+      addBtn.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        addLineFromItem(it, getQty());
+        closePicker(); // <-- close after adding
+      };
+      tr.ondblclick = () => { addLineFromItem(it, getQty()); closePicker(); }; // <-- close on dblclick
     });
 
     search.onkeydown = (e) => {
       if (e.key === "Enter" && filtered.length === 1) {
         e.preventDefault(); e.stopPropagation();
         addLineFromItem(filtered[0], 1);
+        closePicker(); // <-- close on Enter single match
       }
     };
   };
 
-  // Clicking on the dimmed backdrop should close the picker (but not clicks inside the card)
-  wrap.addEventListener("click", (e) => {
-    if (e.target === wrap) wrap.remove();
-  });
+  // click backdrop to close
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) closePicker(); });
 
-  btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrap.remove(); };
+  btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closePicker(); };
   search.oninput = () => render(search.value);
 
   render(initialQuery);
@@ -285,7 +283,8 @@ function openItemPicker({ initialQuery = "" } = {}) {
   setTimeout(() => search.focus(), 0);
 }
 
-  // Add this helper inside openDocForm(...) above draw()
+
+  
 async function ensurePdfModule() {
   // Already present?
   if (typeof window.downloadInvoicePDF === "function" ||
