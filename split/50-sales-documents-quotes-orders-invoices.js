@@ -104,7 +104,45 @@ async function openDocForm(kind, docId) {
     $("#sd_tot").textContent = currency(t.grandTotal);
   };
 
-  // helper: wire one row's events
+  // --- Adapter to support callback, promise, or custom event picker APIs ---
+  async function awaitItemPick() {
+    return new Promise((resolve) => {
+      let settled = false;
+
+      // 1) callback style
+      const opts = {
+        onPick: (it) => {
+          if (!settled) { settled = true; resolve(it || null); }
+        }
+      };
+
+      // 2) custom event fallback
+      const onEvt = (e) => {
+        if (!settled) { settled = true; resolve(e.detail || null); }
+        document.removeEventListener("item:selected", onEvt);
+      };
+      document.addEventListener("item:selected", onEvt, { once: true });
+
+      // 3) call the picker and also handle promise style
+      try {
+        const maybe = typeof openItemFinder === "function" ? openItemFinder(opts) : null;
+        if (maybe && typeof maybe.then === "function") {
+          maybe.then((it) => {
+            if (!settled) { settled = true; resolve(it || null); }
+          }).catch(() => {
+            if (!settled) { settled = true; resolve(null); }
+          });
+        }
+      } catch {
+        if (!settled) { settled = true; resolve(null); }
+      }
+
+      // timeout guard so we don't hang forever
+      setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 30000);
+    });
+  }
+
+  // ---------- UI ----------
   function wireRowEvents(tr) {
     if (!tr) return;
     const idx = +tr.dataset.idx;
@@ -197,24 +235,27 @@ async function openDocForm(kind, docId) {
     $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
     $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
 
-    // Add item: update state, then redraw form (avoids tbody race entirely)
-    $("#sd_add").onclick = () =>
-      openItemFinder({
-        onPick: (it) => {
-          lines.push({
-            id: randId(),
-            docId: doc.id,
-            itemId: it.id,
-            itemName: it.name,
-            qty: 1,
-            unitPrice: +it.sellPrice || 0,
-            discountPct: 0,
-            taxRate: settings.vatRate,
-          });
-          draw();   // re-render from state; tbody guaranteed to exist
-          recalc();
-        },
+    // Add item — works for callback, promise, or custom event pickers
+    $("#sd_add").onclick = async () => {
+      const it = await awaitItemPick();
+      if (!it) {
+        if (typeof toast === "function") toast("No item selected");
+        return;
+      }
+      lines.push({
+        id: randId(),
+        docId: doc.id,
+        itemId: it.id,
+        itemName: it.name,
+        qty: 1,
+        unitPrice: +it.sellPrice || 0,
+        discountPct: 0,
+        taxRate: settings.vatRate,
       });
+      // redraw from state for guaranteed tbody; then recalc + wire
+      draw();
+      recalc();
+    };
 
     // Wire current rows
     wireAllRows();
@@ -238,7 +279,7 @@ async function openDocForm(kind, docId) {
       renderSales(kind);
     };
 
-    // PDF (only if function exists)
+    // PDF (guarded)
     if ($("#sd_pdf")) {
       $("#sd_pdf").onclick = async () => {
         const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF;
