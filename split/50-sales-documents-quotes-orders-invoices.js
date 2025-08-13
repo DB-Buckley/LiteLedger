@@ -190,81 +190,100 @@ async function openDocForm(kind, docId) {
   }
 
   // Single, built-in item picker overlay (search by code/name/barcode, Add buttons)
-  function openItemPicker({ initialQuery = "" } = {}) {
-    const wrap = document.createElement("div");
-    wrap.style.cssText = `
-      position: fixed; inset: 0; background: rgba(0,0,0,.35);
-      display:flex; align-items:center; justify-content:center; z-index:9999;`;
-    wrap.innerHTML = `
-      <div class="card" style="width:min(880px,94vw); max-height:80vh; overflow:auto; padding:12px;">
-        <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <b>Find Item</b>
-          <div class="row" style="gap:8px">
-            <input id="ip_search" placeholder="Search code, name, or barcode" style="min-width:320px">
-            <button type="button" class="btn" id="ip_done">Done</button>
-          </div>
+// MOUNT INSIDE #modal (dialog) so it sits on the same top layer and appears above.
+function openItemPicker({ initialQuery = "" } = {}) {
+  // Host inside the open dialog if present, else fall back to body.
+  const host = document.getElementById("modal") || document.body;
+
+  const wrap = document.createElement("div");
+  wrap.className = "picker-overlay";
+  // VERY high z-index + fixed so it overlays modal content. Since it's inside
+  // the dialog element, it's on the same top layer and will be on top.
+  wrap.style.cssText = `
+    position: fixed; inset: 0; 
+    background: rgba(0,0,0,.35);
+    display:flex; align-items:center; justify-content:center; 
+    z-index: 2147483647; /* max-int-ish */
+  `;
+  wrap.innerHTML = `
+    <div class="card" style="
+      width:min(880px,94vw); max-height:80vh; overflow:auto; padding:12px;
+      position: relative; z-index: 2147483647;">
+      <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <b>Find Item</b>
+        <div class="row" style="gap:8px">
+          <input id="ip_search" placeholder="Search code, name, or barcode" style="min-width:320px">
+          <button type="button" class="btn" id="ip_done">Done</button>
         </div>
-        <div class="bd">
-          <table class="table small">
-            <thead>
-              <tr><th>Code</th><th>Name</th><th class="r">Price</th><th class="r" style="width:120px">Qty</th><th class="r" style="width:90px"></th></tr>
-            </thead>
-            <tbody id="ip_rows"></tbody>
-          </table>
-        </div>
-      </div>`;
-    document.body.appendChild(wrap);
+      </div>
+      <div class="bd">
+        <table class="table small">
+          <thead>
+            <tr><th>Code</th><th>Name</th><th class="r">Price</th><th class="r" style="width:120px">Qty</th><th class="r" style="width:90px"></th></tr>
+          </thead>
+          <tbody id="ip_rows"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
 
-    const rows = wrap.querySelector("#ip_rows");
-    const search = wrap.querySelector("#ip_search");
-    const btnDone = wrap.querySelector("#ip_done");
+  // Append to the dialog (top layer) or body fallback
+  host.appendChild(wrap);
 
-    const render = (q = "") => {
-      const qq = q.toLowerCase().trim();
-      const filtered = !qq ? items : items.filter(it =>
-        (it.name || "").toLowerCase().includes(qq) ||
-        (it.code || "").toLowerCase().includes(qq) ||
-        (it.sku || "").toLowerCase().includes(qq) ||
-        (it.barcode || "").toLowerCase().includes(qq) ||
-        (it.id || "").toString().toLowerCase().includes(qq)
-      );
-      rows.innerHTML = filtered.map((it, i) => `
-        <tr data-i="${i}">
-          <td>${it.code || it.sku || it.id || ""}</td>
-          <td>${it.name}</td>
-          <td class="r">${currency(it.sellPrice)}</td>
-          <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
-          <td class="r"><button type="button" class="btn" data-add>Add</button></td>
-        </tr>
-      `).join("") || `<tr><td colspan="5" class="muted">No matches</td></tr>`;
+  const rows = wrap.querySelector("#ip_rows");
+  const search = wrap.querySelector("#ip_search");
+  const btnDone = wrap.querySelector("#ip_done");
 
-      // Add handlers
-      rows.querySelectorAll("tr[data-i]").forEach((tr) => {
-        const idx = +tr.dataset.i;
-        const it = filtered[idx];
-        const qtyEl = tr.querySelector("[data-qty]");
-        const addBtn = tr.querySelector("[data-add]");
-        const getQty = () => Number(qtyEl?.value || 1) || 1;
+  const render = (q = "") => {
+    const qq = q.toLowerCase().trim();
+    const filtered = !qq ? items : items.filter(it =>
+      (it.name || "").toLowerCase().includes(qq) ||
+      (it.code || "").toLowerCase().includes(qq) ||
+      (it.sku || "").toLowerCase().includes(qq) ||
+      (it.barcode || "").toLowerCase().includes(qq) ||
+      (it.id || "").toString().toLowerCase().includes(qq)
+    );
+    rows.innerHTML = filtered.map((it, i) => `
+      <tr data-i="${i}">
+        <td>${it.code || it.sku || it.id || ""}</td>
+        <td>${it.name}</td>
+        <td class="r">${currency(it.sellPrice)}</td>
+        <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
+        <td class="r"><button type="button" class="btn" data-add>Add</button></td>
+      </tr>
+    `).join("") || `<tr><td colspan="5" class="muted">No matches</td></tr>`;
 
-        addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); addLineFromItem(it, getQty()); };
-        tr.ondblclick = () => addLineFromItem(it, getQty());
-      });
+    rows.querySelectorAll("tr[data-i]").forEach((tr) => {
+      const idx = +tr.dataset.i;
+      const it = filtered[idx];
+      const qtyEl = tr.querySelector("[data-qty]");
+      const addBtn = tr.querySelector("[data-add]");
+      const getQty = () => Number(qtyEl?.value || 1) || 1;
 
-      // Enter to add when exactly one row visible
-      search.onkeydown = (e) => {
-        if (e.key === "Enter" && filtered.length === 1) {
-          e.preventDefault(); e.stopPropagation();
-          addLineFromItem(filtered[0], 1);
-        }
-      };
+      addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); addLineFromItem(it, getQty()); };
+      tr.ondblclick = () => addLineFromItem(it, getQty());
+    });
+
+    search.onkeydown = (e) => {
+      if (e.key === "Enter" && filtered.length === 1) {
+        e.preventDefault(); e.stopPropagation();
+        addLineFromItem(filtered[0], 1);
+      }
     };
+  };
 
-    btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrap.remove(); };
-    search.oninput = () => render(search.value);
-    render(initialQuery);
-    search.value = initialQuery;
-    setTimeout(() => search.focus(), 0);
-  }
+  // Clicking on the dimmed backdrop should close the picker (but not clicks inside the card)
+  wrap.addEventListener("click", (e) => {
+    if (e.target === wrap) wrap.remove();
+  });
+
+  btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); wrap.remove(); };
+  search.oninput = () => render(search.value);
+
+  render(initialQuery);
+  search.value = initialQuery;
+  setTimeout(() => search.focus(), 0);
+}
 
   // ---------- Render ----------
   const draw = () => {
