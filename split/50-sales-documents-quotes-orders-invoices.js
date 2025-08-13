@@ -1,6 +1,6 @@
 // ===========================================================================
 // 50-sales-documents-quotes-orders-invoices.js
-// Sales Documents (Quotes / Orders / Invoices) + Quotes History
+// Sales Documents (Quotes / Orders / Invoices) + Quotes & Sales Order History
 //
 // Depends on: 01-db.js, 02-helpers.js ( $, $$, all, get, put, add, del,
 // whereIndex, nextDocNo, randId, nowISO, sumDoc, calcLineTotals, currency, toast )
@@ -9,15 +9,18 @@
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE", opts = {}) {
-  const history = !!opts.history; // when true, show converted docs
+  const history = !!opts.history; // show converted (history) vs active
   const v = $("#view");
   if (!v) return;
 
   const allDocs = await all("docs");
   let docs = (allDocs || []).filter((d) => d.type === kind);
 
-  // Active vs History split
+  // Active vs History filtering
+  const isQuotes = kind === "QUOTE";
+  const isOrders = kind === "ORDER";
   if (history) {
+    // history = converted/readOnly
     docs = docs.filter((d) => d.status === "CONVERTED" || d.readOnly || d.convertedToId);
   } else {
     docs = docs.filter((d) => !(d.status === "CONVERTED" || d.readOnly || d.convertedToId));
@@ -28,7 +31,10 @@ async function renderSales(kind = "INVOICE", opts = {}) {
   const customers = await all("customers");
   const cname = (id) => customers.find((c) => c.id === id)?.name || "—";
 
-  const label = history && kind === "QUOTE" ? "Quotes History" : `${kind}s`;
+  const label =
+    isQuotes && history ? "Quotes History" :
+    isOrders && history ? "Sales Order History" :
+    `${kind}s`;
 
   v.innerHTML = `
   <div class="card">
@@ -36,8 +42,19 @@ async function renderSales(kind = "INVOICE", opts = {}) {
       <b>${label}</b>
       <div class="toolbar">
         <input id="d_search" placeholder="Search no / customer" style="min-width:240px">
-        ${kind === "QUOTE" ? `<button type="button" class="btn" id="d_toggle_hist">${history ? "Active Quotes" : "Quotes History"}</button>` : ""}
-        ${history ? "" : `<button type="button" class="btn primary" id="d_new">+ New ${kind}</button>`}
+        ${
+          isQuotes
+            ? (history
+                ? `<button type="button" class="btn" id="d_back_active_quotes">Active Quotes</button>`
+                : `<button type="button" class="btn" id="d_quotes_history">Quotes History</button>
+                   <button type="button" class="btn primary" id="d_new">+ New Quote</button>`)
+          : isOrders
+            ? (history
+                ? `<button type="button" class="btn" id="d_back_active_orders">Active Sales Orders</button>`
+                : `<button type="button" class="btn" id="d_orders_history">Sales Order History</button>
+                   <button type="button" class="btn primary" id="d_new">+ New Order</button>`)
+            : `<button type="button" class="btn primary" id="d_new">+ New ${kind}</button>`
+        }
       </div>
     </div>
     <div class="bd">
@@ -69,26 +86,19 @@ async function renderSales(kind = "INVOICE", opts = {}) {
     });
   };
 
-  // Toggle Quotes <-> Quotes History
-  const toggleBtn = $("#d_toggle_hist");
-  if (toggleBtn) {
-    toggleBtn.onclick = () => {
-      if (history) {
-        location.hash = "#/quotes";           // Active quotes route
-      } else {
-        location.hash = "#/quotes-history";   // History route
-      }
-    };
-  }
+  // Toolbar toggles
+  $("#d_quotes_history")?.addEventListener("click", () => { location.hash = "#/quotes-history"; });
+  $("#d_back_active_quotes")?.addEventListener("click", () => { location.hash = "#/quotes"; });
+  $("#d_orders_history")?.addEventListener("click", () => { location.hash = "#/orders-history"; });
+  $("#d_back_active_orders")?.addEventListener("click", () => { location.hash = "#/orders"; });
 
   // New
-  const newBtn = $("#d_new");
-  if (newBtn) newBtn.onclick = () => openDocForm(kind);
+  $("#d_new")?.addEventListener("click", () => openDocForm(kind));
 
   // View
   $$("#d_rows [data-view]").forEach((b) => (b.onclick = () => {
-    const ro = history && kind === "QUOTE"; // open history quotes as read-only
-    openDocForm(kind, b.dataset.view, { readOnly: ro });
+    const readOnly = history && (isQuotes || isOrders);
+    openDocForm(kind, b.dataset.view, { readOnly });
   }));
 }
 
@@ -99,7 +109,7 @@ async function openDocForm(kind, docId, opts = {}) {
   const settings = settingsRec?.value || {};
   const allItemsRaw = await all("items");
 
-  // Normalize items
+  // Normalize items for search & code scans
   const items = (allItemsRaw || []).map((raw) => ({
     raw,
     id: raw.id ?? raw.itemId ?? raw.sku ?? raw.code ?? null,
@@ -123,7 +133,7 @@ async function openDocForm(kind, docId, opts = {}) {
   };
   const lines = editing ? await whereIndex("lines", "by_doc", doc.id) : [];
 
-  // View-only when requested or when already converted
+  // View-only when requested or when converted
   const readOnly = !!opts.readOnly || doc.status === "CONVERTED" || !!doc.readOnly || !!doc.convertedToId;
 
   const m = $("#modal"), body = $("#modalBody");
@@ -402,14 +412,20 @@ async function openDocForm(kind, docId, opts = {}) {
 
   // ---------------------- draw ----------------------
   const draw = () => {
+    const headerTitle =
+      readOnly
+        ? `View ${kind}${doc.status === "CONVERTED" ? " (Converted)" : ""}`
+        : editing ? `View/Edit ${kind}` : `New ${kind}`;
+
     body.innerHTML = `
       <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <h3>${readOnly ? "View" : editing ? "View/Edit" : "New"} ${kind}${readOnly && doc.status === "CONVERTED" ? " (Converted)" : ""}</h3>
+        <h3>${headerTitle}</h3>
         <div class="row" id="sd_actions" style="gap:8px">
           ${readOnly ? "" : `<input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">`}
           ${readOnly ? "" : `<button type="button" class="btn" id="sd_add">+ Add Item</button>`}
           <button type="button" class="btn" id="sd_pdf">PDF</button>
-          ${(!readOnly && editing && kind !== "INVOICE") ? `<button type="button" class="btn" id="sd_convert">Convert → Invoice</button>` : ""}
+          ${(!readOnly && editing && kind === "QUOTE") ? `<button type="button" class="btn" id="sd_convert_q2o">Convert → Sales Order</button>` : ""}
+          ${(!readOnly && editing && kind === "ORDER") ? `<button type="button" class="btn" id="sd_convert_o2i">Convert → Invoice</button>` : ""}
           ${!readOnly && editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
           ${!readOnly ? `<button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>` : ""}
           <button type="button" class="btn" id="sd_close">Close</button>
@@ -504,20 +520,79 @@ async function openDocForm(kind, docId, opts = {}) {
         renderSales(kind);
       });
 
-      // Convert → Invoice (for QUOTE / ORDER)
-      const convertBtn = $("#sd_convert");
-      if (convertBtn) {
-        convertBtn.addEventListener("click", async (e) => {
+      // Convert Quote → Sales Order
+      const q2oBtn = $("#sd_convert_q2o");
+      if (q2oBtn) {
+        q2oBtn.addEventListener("click", async (e) => {
           e.preventDefault(); e.stopPropagation();
 
           if (doc.convertedToId) {
-            try {
-              const target = await get("docs", doc.convertedToId);
-              if (target) { m.close(); openDocForm("INVOICE", target.id); return; }
-            } catch (_) {}
+            const target = await getSafe("docs", doc.convertedToId);
+            if (target) { m.close(); openDocForm("ORDER", target.id); return; }
           }
 
-          if (!confirm(`Convert this ${kind.toLowerCase()} to an INVOICE?`)) return;
+          if (!confirm("Convert this quote to a SALES ORDER?")) return;
+
+          const newId = randId();
+          const orderNo = await nextDocNo("ORDER");
+          const issue = nowISO().slice(0, 10);
+
+          const order = {
+            id: newId,
+            type: "ORDER",
+            no: orderNo,
+            customerId: doc.customerId,
+            warehouseId: doc.warehouseId || "WH1",
+            dates: { issue, due: issue },
+            totals: { subTotal: 0, tax: 0, grandTotal: 0 },
+            notes: doc.notes || "",
+            createdAt: nowISO(),
+            sourceId: doc.id,
+            sourceType: doc.type,
+          };
+          await put("docs", order);
+
+          // clone lines
+          for (const ln of lines) {
+            const clone = { ...ln, id: randId(), docId: newId };
+            await put("lines", clone);
+          }
+
+          // compute totals and update order
+          const oLines = await whereIndex("lines", "by_doc", newId);
+          const totals = sumDoc(oLines.map(l => ({
+            qty: l.qty,
+            unitPrice: l.unitPrice ?? 0,
+            discountPct: l.discountPct,
+            taxRate: l.taxRate ?? settings.vatRate ?? 15,
+          })));
+          order.totals = totals;
+          await put("docs", order);
+
+          // mark quote as converted & read-only (moves to Quotes History)
+          doc.convertedToId = newId;
+          doc.status = "CONVERTED";
+          doc.readOnly = true;
+          await put("docs", doc);
+
+          toast("Sales Order created from Quote");
+          m.close();
+          openDocForm("ORDER", newId);
+        });
+      }
+
+      // Convert Order → Invoice
+      const o2iBtn = $("#sd_convert_o2i");
+      if (o2iBtn) {
+        o2iBtn.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+
+          if (doc.convertedToId) {
+            const target = await getSafe("docs", doc.convertedToId);
+            if (target) { m.close(); openDocForm("INVOICE", target.id); return; }
+          }
+
+          if (!confirm("Convert this sales order to an INVOICE?")) return;
 
           const newId = randId();
           const invNo = await nextDocNo("INVOICE");
@@ -565,20 +640,19 @@ async function openDocForm(kind, docId, opts = {}) {
           inv.totals = totals;
           await put("docs", inv);
 
-          // mark source (quote/order) as converted + readOnly
+          // mark order as converted & read-only (moves to Sales Order History)
           doc.convertedToId = newId;
           doc.status = "CONVERTED";
           doc.readOnly = true;
           await put("docs", doc);
 
-          toast("Invoice created from " + kind);
+          toast("Invoice created from Sales Order");
           m.close();
-          // Jump to the new invoice
           openDocForm("INVOICE", newId);
         });
       }
 
-      // Delete (with stock reverse for invoices)
+      // Delete (with stock reverse only for invoices)
       const delBtn = $("#sd_delete");
       if (delBtn) {
         delBtn.addEventListener("click", async (e) => {
@@ -638,13 +712,19 @@ async function openDocForm(kind, docId, opts = {}) {
   draw();
 }
 
+// Helpers
+async function getSafe(store, id) {
+  try { return await get(store, id); } catch { return null; }
+}
+
 // Expose for router (and convenience)
 window.renderSales = renderSales;
 window.renderSalesDocuments = renderSales;
 window.renderSalesList = renderSales;
 
-// Convenience helpers for routes:
+// Convenience route helpers:
 window.renderQuotes = () => renderSales("QUOTE", { history: false });
 window.renderQuotesHistory = () => renderSales("QUOTE", { history: true });
 window.renderOrders = () => renderSales("ORDER", { history: false });
+window.renderOrdersHistory = () => renderSales("ORDER", { history: true });
 window.renderInvoices = () => renderSales("INVOICE", { history: false });
