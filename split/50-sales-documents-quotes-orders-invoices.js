@@ -1,7 +1,14 @@
 // ===========================================================================
 // Sales Documents (Quotes / Orders / Invoices)
+// Depends on: 01-db.js, 02-helpers.js ( $, $$, all, get, put, add, del,
+// whereIndex, nextDocNo, randId, nowISO, sumDoc, calcLineTotals, currency,
+// toast ), optional: openItemFinder(), downloadInvoicePDF()/exportInvoicePDF()
+// ===========================================================================
+
 async function renderSales(kind = "INVOICE") {
   const v = $("#view");
+  if (!v) return;
+
   const docs = (await all("docs"))
     .filter((d) => d.type === kind)
     .sort((a, b) => (b.dates?.issue || "").localeCompare(a.dates?.issue || ""));
@@ -104,45 +111,115 @@ async function openDocForm(kind, docId) {
     $("#sd_tot").textContent = currency(t.grandTotal);
   };
 
-  // --- Adapter to support callback, promise, or custom event picker APIs ---
+  // --- Normalize picker payloads to a unified shape ---
+  function normItem(raw) {
+    if (!raw) return null;
+    return {
+      id: raw.id ?? raw.itemId ?? raw.sku ?? raw.code ?? null,
+      name: raw.name ?? raw.title ?? raw.label ?? String(raw.sku || raw.code || "Item"),
+      sellPrice: Number(raw.sellPrice ?? raw.price ?? raw.unitPrice ?? raw.defaultPrice ?? 0) || 0,
+    };
+  }
+
+  // --- Adapter: support callback, promise, or custom-event pickers ---
   async function awaitItemPick() {
     return new Promise((resolve) => {
       let settled = false;
 
       // 1) callback style
       const opts = {
-        onPick: (it) => {
-          if (!settled) { settled = true; resolve(it || null); }
-        }
+        onPick: (it) => { if (!settled) { settled = true; resolve(normItem(it)); } }
       };
 
-      // 2) custom event fallback
+      // 2) custom event
       const onEvt = (e) => {
-        if (!settled) { settled = true; resolve(e.detail || null); }
+        if (!settled) { settled = true; resolve(normItem(e.detail)); }
         document.removeEventListener("item:selected", onEvt);
       };
       document.addEventListener("item:selected", onEvt, { once: true });
 
-      // 3) call the picker and also handle promise style
+      // 3) promise-returning picker
       try {
-        const maybe = typeof openItemFinder === "function" ? openItemFinder(opts) : null;
-        if (maybe && typeof maybe.then === "function") {
-          maybe.then((it) => {
-            if (!settled) { settled = true; resolve(it || null); }
-          }).catch(() => {
-            if (!settled) { settled = true; resolve(null); }
-          });
+        if (typeof window.openItemFinder === "function") {
+          const maybe = window.openItemFinder(opts);
+          if (maybe && typeof maybe.then === "function") {
+            maybe.then((it) => {
+              if (!settled) { settled = true; resolve(normItem(it)); }
+            }).catch(() => {
+              if (!settled) { settled = true; resolve(null); }
+            });
+          }
+        } else {
+          setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 0);
         }
       } catch {
         if (!settled) { settled = true; resolve(null); }
       }
 
-      // timeout guard so we don't hang forever
-      setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 30000);
+      // Guard: avoid hanging forever
+      setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 15000);
     });
   }
 
-  // ---------- UI ----------
+  // --- Built-in fallback picker (search + click), used if external picker yields nothing ---
+  async function simpleItemPicker(allItems) {
+    return new Promise(async (resolve) => {
+      const items = Array.isArray(allItems) ? allItems.map(normItem).filter(Boolean) : [];
+
+      const wrap = document.createElement("div");
+      wrap.style.cssText = `
+        position: fixed; inset: 0; background: rgba(0,0,0,.35);
+        display:flex; align-items:center; justify-content:center; z-index:9999;`;
+      wrap.innerHTML = `
+        <div class="card" style="width:min(720px,94vw); max-height:80vh; overflow:auto; padding:12px;">
+          <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
+            <b>Pick an Item</b>
+            <button class="btn" id="sp_close">Close</button>
+          </div>
+          <div class="bd">
+            <input id="sp_search" placeholder="Search name or id" style="width:100%;margin:8px 0;padding:8px">
+            <table class="table small">
+              <thead><tr><th>Name</th><th class="r">Price</th></tr></thead>
+              <tbody id="sp_rows"></tbody>
+            </table>
+          </div>
+        </div>`;
+      document.body.appendChild(wrap);
+
+      const rows = wrap.querySelector("#sp_rows");
+      const search = wrap.querySelector("#sp_search");
+      const close = wrap.querySelector("#sp_close");
+
+      const cleanup = () => wrap.remove();
+
+      const render = (q="") => {
+        const qq = q.toLowerCase().trim();
+        const filtered = !qq ? items : items.filter(it =>
+          (it.name||"").toLowerCase().includes(qq) ||
+          String(it.id||"").toLowerCase().includes(qq)
+        );
+        rows.innerHTML = filtered.map((it, i) => `
+          <tr data-i="${i}" style="cursor:pointer">
+            <td>${it.name}</td>
+            <td class="r">${currency(it.sellPrice)}</td>
+          </tr>
+        `).join("") || `<tr><td colspan="2" class="muted">No matches</td></tr>`;
+        rows.querySelectorAll("tr[data-i]").forEach(tr => {
+          tr.onclick = () => {
+            const idx = +tr.dataset.i;
+            const it = filtered[idx];
+            cleanup(); resolve(it);
+          };
+        });
+      };
+
+      close.onclick = () => { cleanup(); resolve(null); };
+      search.oninput = () => render(search.value);
+      render();
+    });
+  }
+
+  // ---------- Row wiring ----------
   function wireRowEvents(tr) {
     if (!tr) return;
     const idx = +tr.dataset.idx;
@@ -181,6 +258,7 @@ async function openDocForm(kind, docId) {
     tbody.querySelectorAll("tr[data-idx]").forEach(wireRowEvents);
   }
 
+  // ---------- Render ----------
   const draw = () => {
     const hasPdf =
       (typeof window.downloadInvoicePDF === "function") ||
@@ -235,9 +313,13 @@ async function openDocForm(kind, docId) {
     $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
     $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
 
-    // Add item — works for callback, promise, or custom event pickers
+    // Add item — try external picker; if nothing, use the built-in fallback
     $("#sd_add").onclick = async () => {
-      const it = await awaitItemPick();
+      let it = await awaitItemPick();
+      if (!it) {
+        const allItems = await all("items");
+        it = await simpleItemPicker(allItems);
+      }
       if (!it) {
         if (typeof toast === "function") toast("No item selected");
         return;
@@ -252,12 +334,11 @@ async function openDocForm(kind, docId) {
         discountPct: 0,
         taxRate: settings.vatRate,
       });
-      // redraw from state for guaranteed tbody; then recalc + wire
-      draw();
+      draw();   // redraw from state for guaranteed tbody
       recalc();
     };
 
-    // Wire current rows
+    // Wire rows present after render
     wireAllRows();
 
     // Save
@@ -279,7 +360,7 @@ async function openDocForm(kind, docId) {
       renderSales(kind);
     };
 
-    // PDF (guarded)
+    // PDF (only if function exists)
     if ($("#sd_pdf")) {
       $("#sd_pdf").onclick = async () => {
         const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF;
@@ -326,3 +407,6 @@ async function openDocForm(kind, docId) {
 
   draw();
 }
+
+// Expose for router
+window.renderSales = renderSales;
