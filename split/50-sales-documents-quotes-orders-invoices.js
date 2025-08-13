@@ -387,34 +387,38 @@ async function ensurePdfModule() {
   $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
 
   // Save / Create
-  actions.querySelector("#sd_save").addEventListener("click", async (e) => {
-    e.preventDefault(); e.stopPropagation();
+  actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
+  e.preventDefault(); e.stopPropagation();
 
-    recalc();
-    await put("docs", doc);
+  // Open the window synchronously so the browser won’t block it
+  const w = window.open("", "_blank", "noopener,noreferrer");
+  if (!w) { toast?.("Please allow popups for this site to view PDFs."); return; }
+  try {
+    // Show a quick placeholder immediately
+    w.document.open();
+    w.document.write(`<!doctype html><meta charset="utf-8"><title>Generating…</title>
+      <style>body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#444}</style>
+      <div>Generating PDF…</div>`);
+    w.document.close();
+  } catch {}
 
-    if (editing) {
-      const existing = await whereIndex("lines", "by_doc", doc.id);
-      await Promise.all(existing.map((ln) => del("lines", ln.id)));
-    }
-    for (const ln of lines) {
-      ln.docId = doc.id;
-      await put("lines", ln);
-    }
-    if (kind === "INVOICE" && typeof adjustStockOnInvoice === "function") {
-      await adjustStockOnInvoice(doc, lines);
-    }
+  // Make sure the PDF module is loaded
+  const ok = await ensurePdfModule(); // keep your existing loader; adjust path inside it if needed
+  if (!ok || typeof window.downloadInvoicePDFInto !== "function") {
+    toast?.("PDF module not available (60-pdf.js)");
+    try { w.close(); } catch {}
+    return;
+  }
 
-    toast(editing ? `${kind} updated` : `${kind} created`);
-
-    // Offer PDF immediately after save
-    if (await ensurePdfModule()) {
-      const pdfFn = window.downloadInvoicePDF || window.exportInvoicePDF || window.generateInvoicePDF;
-      if (typeof pdfFn === "function" && confirm("Open PDF now?")) {
-        try { await pdfFn(doc.id, { doc, lines }); }
-        catch (err) { console.error(err); toast?.("PDF export failed"); }
-      }
-    }
+  // Render into the already-opened window (avoids popup blockers)
+  try {
+    await window.downloadInvoicePDFInto(w, doc.id, { doc, lines });
+  } catch (err) {
+    console.error(err);
+    toast?.("PDF export failed");
+    try { w.close(); } catch {}
+  }
+});
 
     m.close();
     renderSales(kind);
