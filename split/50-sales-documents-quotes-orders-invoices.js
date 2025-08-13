@@ -5,7 +5,7 @@
 // Depends on: 01-db.js, 02-helpers.js ( $, $$, all, get, put, add, del,
 // whereIndex, nextDocNo, randId, nowISO, sumDoc, calcLineTotals, currency, toast )
 // Optional: adjustStockOnInvoice
-// Works with: 60-pdf.js (downloadInvoicePDFInto, getInvoiceHTML)
+// Works with: 60-pdf.js (getInvoiceHTML)
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE") {
@@ -199,13 +199,11 @@ async function openDocForm(kind, docId) {
 
   // Lazy-load PDF module (tries common paths)
   async function ensurePdfModule() {
-    if (typeof window.downloadInvoicePDFInto === "function" ||
-        typeof window.getInvoiceHTML === "function") return true;
+    if (typeof window.getInvoiceHTML === "function") return true;
 
     if (window.__pdfModuleLoading) {
       await window.__pdfModuleLoading;
-      return (typeof window.downloadInvoicePDFInto === "function" ||
-              typeof window.getInvoiceHTML === "function");
+      return (typeof window.getInvoiceHTML === "function");
     }
 
     const candidates = ["60-pdf.js", "/60-pdf.js", "/split/60-pdf.js"];
@@ -221,8 +219,7 @@ async function openDocForm(kind, docId) {
             s.onerror = reject;
             document.head.appendChild(s);
           });
-          if (typeof window.downloadInvoicePDFInto === "function" ||
-              typeof window.getInvoiceHTML === "function") {
+          if (typeof window.getInvoiceHTML === "function") {
             return true;
           }
         } catch (_) { /* try next */ }
@@ -234,33 +231,40 @@ async function openDocForm(kind, docId) {
     return ok === true;
   }
 
-  // Fallback: print rendered HTML inside an overlay iframe (no popups needed)
-  function printHtmlInOverlay(html, title) {
+  // PDF overlay inside the dialog top-layer (no popups, sits above the sales modal)
+  function showPdfOverlay(html, title) {
+    const host = document.getElementById("modal") || document.body; // mount in dialog to be on top layer
     const overlay = document.createElement("div");
-    overlay.style.cssText = "position:fixed;inset:0;background:#fff;z-index:2147483647;";
+    overlay.style.cssText = `
+      position: fixed; inset: 0; background: rgba(0,0,0,.45);
+      display:flex; align-items:center; justify-content:center; z-index:2147483647;`;
     overlay.innerHTML = `
-      <iframe id="__print_iframe" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
-      <button id="__print_close" style="
-        position:fixed;top:10px;right:10px;z-index:2147483648;
-        padding:6px 10px;border:0;border-radius:6px;background:#111;color:#fff;cursor:pointer;">
-        Close
-      </button>`;
-    document.body.appendChild(overlay);
+      <div class="card" style="width:min(900px,96vw);height:min(90vh,900px);display:flex;flex-direction:column;overflow:hidden">
+        <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <b>${title || "Document"}</b>
+          <div class="row" style="gap:8px">
+            <button type="button" class="btn" id="pdf_print">Print</button>
+            <button type="button" class="btn" id="pdf_close">Close</button>
+          </div>
+        </div>
+        <div class="bd" style="flex:1;overflow:hidden">
+          <iframe id="pdf_iframe" style="width:100%;height:100%;border:0;background:#fff"></iframe>
+        </div>
+      </div>`;
+    host.appendChild(overlay);
 
-    const iframe = overlay.querySelector("#__print_iframe");
-    const close = overlay.querySelector("#__print_close");
-    close.addEventListener("click", () => overlay.remove());
+    const iframe = overlay.querySelector("#pdf_iframe");
+    const btnPrint = overlay.querySelector("#pdf_print");
+    const btnClose = overlay.querySelector("#pdf_close");
 
+    // write HTML into iframe
     const idoc = iframe.contentDocument;
     try { idoc.open(); idoc.write(html); idoc.close(); } catch (e) { console.error(e); }
 
-    iframe.addEventListener("load", () => {
-      try {
-        iframe.contentWindow.document.title = title || "Document";
-        iframe.contentWindow.focus();
-        setTimeout(() => iframe.contentWindow.print(), 200);
-      } catch (e) { console.error(e); }
-    });
+    btnPrint.onclick = () => {
+      try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { console.error(e); }
+    };
+    btnClose.onclick = () => overlay.remove();
   }
 
   // Single in-dialog item picker (sits above the dialog and closes after add)
@@ -452,51 +456,18 @@ async function openDocForm(kind, docId) {
       renderSales(kind);
     });
 
-    // PDF: try new tab; fallback to on-page iframe if popups blocked
+    // PDF: render in overlay INSIDE the dialog (no popups, always on top)
     actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
       e.preventDefault(); e.stopPropagation();
 
-      // Try to open a tab first (best UX)
-      let w = null;
-      try { w = window.open("", "_blank", "noopener,noreferrer"); } catch {}
-      if (w) {
-        try {
-          w.document.open();
-          w.document.write(`<!doctype html><meta charset="utf-8"><title>Generating…</title>
-            <style>body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#444}</style>
-            <div>Generating PDF…</div>`);
-          w.document.close();
-        } catch {}
-      }
-
       const ok = await ensurePdfModule();
-      if (!ok) {
+      if (!ok || typeof window.getInvoiceHTML !== "function") {
         toast?.("PDF module not available (60-pdf.js)");
-        try { w?.close(); } catch {}
-        return;
-      }
-
-      // If a tab opened and we can stream into it, do that
-      if (w && typeof window.downloadInvoicePDFInto === "function") {
-        try {
-          await window.downloadInvoicePDFInto(w, doc.id, { doc, lines });
-          return;
-        } catch (err) {
-          console.error(err);
-          toast?.("PDF export failed");
-          try { w.close(); } catch {}
-          // fall through to iframe fallback
-        }
-      }
-
-      // Fallback: render in same tab via iframe overlay (works with pop-up blockers)
-      if (typeof window.getInvoiceHTML !== "function") {
-        toast?.("PDF render helper missing (getInvoiceHTML).");
         return;
       }
       try {
         const { title, html } = await window.getInvoiceHTML(doc.id, { doc, lines });
-        printHtmlInOverlay(html, title);
+        showPdfOverlay(html, title);
       } catch (err) {
         console.error(err);
         toast?.("PDF render failed");
@@ -546,5 +517,5 @@ async function openDocForm(kind, docId) {
 
 // Expose for router (compat aliases)
 window.renderSales = renderSales;
-window.renderSalesDocuments = renderSales; // some routers expect this
-window.renderSalesList = renderSales;      // and/or this
+window.renderSalesDocuments = renderSales;
+window.renderSalesList = renderSales;
