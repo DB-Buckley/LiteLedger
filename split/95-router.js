@@ -17,6 +17,7 @@
     
     "/items": "renderItems",
     "/purchases": "renderPurchases",
+    "/supplier-payments": "renderSupplierPayments",
 
     // Sales
     "/quotes": "renderQuotes",
