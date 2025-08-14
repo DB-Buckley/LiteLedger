@@ -1,20 +1,36 @@
 // ============================================================================
-// Customers (list + create/edit)
+// Customers (active list + archived list + create/edit modal)
+// Depends on: 01-db.js, 02-helpers.js ($, $$, all, get, put, add, del, nowISO, randId, round2, currency, toast)
+// Routes expected: "#/customers" and "#/customers-archived"
+// Exposes: window.renderCustomers (active), window.renderCustomersArchived (archived)
+// ============================================================================
 
-async function renderCustomers() {
+async function renderCustomers(opts = {}) {
+  const archived = !!opts.archived;
   const v = $("#view");
-  const [customers, docs, payments] = await Promise.all([all("customers"), all("docs"), all("payments")]);
+  if (!v) return;
 
-  // quick stats: open balance per customer
-  const invoices = docs.filter(d => d.type === "INVOICE");
+  // Load data we need for quick stats (owing per customer)
+  const [customersAll, docsAll, paymentsAll] = await Promise.all([
+    all("customers"),
+    all("docs"),
+    all("payments"),
+  ]);
+
+  const customers = (customersAll || []).filter(c => !!c.archived === archived);
+
+  // Compute open balances from invoices minus allocations
+  const invoices = (docsAll || []).filter(d => d.type === "INVOICE");
   const paidByInv = new Map();
-  for (const p of payments) for (const a of (p.allocations || []))
-    paidByInv.set(a.invoiceId, (paidByInv.get(a.invoiceId) || 0) + (Number(a.amount) || 0));
-
+  for (const p of (paymentsAll || [])) {
+    for (const a of (p.allocations || [])) {
+      paidByInv.set(a.invoiceId, (paidByInv.get(a.invoiceId) || 0) + (Number(a.amount) || 0));
+    }
+  }
   const owingByCustomer = new Map();
   for (const inv of invoices) {
     const total = inv.totals?.grandTotal || 0;
-    const paid = paidByInv.get(inv.id) || 0;
+    const paid  = paidByInv.get(inv.id) || 0;
     const owing = Math.max(0, round2(total - paid));
     if (owing > 0) {
       const k = inv.customerId || "unknown";
@@ -22,12 +38,16 @@ async function renderCustomers() {
     }
   }
 
-  const rows = customers
+  // Rows
+  const rowsHtml = (customers
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
     .map(c => `
       <tr data-id="${c.id}">
         <td>${c.code || ""}</td>
-        <td>${c.name || ""}${c.archived ? ' <span class="pill" style="margin-left:6px;background:#ddd;color:#333">archived</span>' : ""}</td>
+        <td>
+          ${c.name || ""}
+          ${c.archived ? ' <span class="pill" style="margin-left:6px;background:#ddd;color:#333">archived</span>' : ""}
+        </td>
         <td>${c.contact?.person || ""}</td>
         <td>${c.contact?.phone || ""}</td>
         <td class="r">${currency(owingByCustomer.get(c.id) || 0)}</td>
@@ -36,15 +56,20 @@ async function renderCustomers() {
           <button class="btn" data-edit="${c.id}">Edit</button>
         </td>
       </tr>
-    `).join("");
+    `).join("")) || '<tr><td colspan="7">No customers yet</td></tr>';
 
   v.innerHTML = `
     <div class="card">
       <div class="hd">
-        <b>Customers</b>
+        <b>${archived ? "Archived Customers" : "Customers"}</b>
         <div class="toolbar">
           <input id="cust_search" placeholder="Search name / code / contact" style="min-width:280px">
-          <button class="btn primary" id="cust_new">+ New Customer</button>
+          ${
+            archived
+              ? `<button class="btn" id="cust_back_active">Active Customers</button>`
+              : `<button class="btn" id="cust_archived">Archived Customers</button>
+                 <button class="btn primary" id="cust_new">+ New Customer</button>`
+          }
         </div>
       </div>
       <div class="bd">
@@ -53,14 +78,14 @@ async function renderCustomers() {
             <thead>
               <tr><th>Code</th><th>Name</th><th>Contact</th><th>Phone</th><th>Owing</th><th>Terms</th><th></th></tr>
             </thead>
-            <tbody id="cust_rows">${rows || '<tr><td colspan="7">No customers yet</td></tr>'}</tbody>
+            <tbody id="cust_rows">${rowsHtml}</tbody>
           </table>
         </div>
       </div>
     </div>
   `;
 
-  // search filter
+  // Search filter
   const filter = () => {
     const q = ($("#cust_search").value || "").toLowerCase();
     $$("#cust_rows tr").forEach(tr => {
@@ -69,8 +94,14 @@ async function renderCustomers() {
   };
   $("#cust_search").oninput = filter;
 
-  $("#cust_new").onclick = () => openCustomerForm();
+  // Toolbar nav
+  $("#cust_archived")?.addEventListener("click", () => goto("/customers-archived"));
+  $("#cust_back_active")?.addEventListener("click", () => goto("/customers"));
 
+  // New customer (only on active list)
+  $("#cust_new")?.addEventListener("click", () => openCustomerForm());
+
+  // Edit buttons
   $$("#cust_rows [data-edit]").forEach(btn => {
     btn.onclick = () => openCustomerForm(btn.dataset.edit);
   });
@@ -78,6 +109,8 @@ async function renderCustomers() {
 
 async function openCustomerForm(id) {
   const m = $("#modal"), body = $("#modalBody");
+  if (!m || !body) return;
+
   const editing = id ? await get("customers", id) : null;
   const c = editing || {
     id: randId(),
@@ -92,9 +125,15 @@ async function openCustomerForm(id) {
     createdAt: nowISO(),
   };
 
-  // quick activity (last 6 docs)
-  const docs = await all("docs");
-  const recent = docs
+  // For deciding which list to refresh after archive/unarchive
+  const inArchivedView = (() => {
+    const h = (location.hash || "");
+    return h.includes("/customers-archived");
+  })();
+
+  // Quick activity (last 6 docs)
+  const docsAll = await all("docs");
+  const recent = (docsAll || [])
     .filter(d => d.customerId === c.id)
     .sort((a,b) => (b.dates?.issue || b.createdAt || "").localeCompare(a.dates?.issue || a.createdAt || ""))
     .slice(0, 6);
@@ -143,38 +182,58 @@ async function openCustomerForm(id) {
   `;
   m.showModal();
 
-  // bind fields
-  $("#c_code").oninput = () => c.code = $("#c_code").value.trim();
-  $("#c_name").oninput = () => c.name = $("#c_name").value.trim();
+  // Bind fields
+  $("#c_code").oninput   = () => c.code = $("#c_code").value.trim();
+  $("#c_name").oninput   = () => c.name = $("#c_name").value.trim();
   $("#c_person").oninput = () => (c.contact = { ...(c.contact||{}), person: $("#c_person").value.trim() });
-  $("#c_phone").oninput = () => (c.contact = { ...(c.contact||{}), phone: $("#c_phone").value.trim() });
-  $("#c_email").oninput = () => (c.contact = { ...(c.contact||{}), email: $("#c_email").value.trim() });
-  $("#c_terms").oninput = () => c.termsDays = Math.max(0, parseInt($("#c_terms").value || "0", 10));
-  $("#c_limit").oninput = () => c.creditLimit = round2($("#c_limit").value || 0);
-  $("#c_tax").onchange = () => c.taxExempt = $("#c_tax").checked;
-  $("#c_open").oninput = () => c.openingBalance = round2($("#c_open").value || 0);
+  $("#c_phone").oninput  = () => (c.contact = { ...(c.contact||{}), phone: $("#c_phone").value.trim() });
+  $("#c_email").oninput  = () => (c.contact = { ...(c.contact||{}), email: $("#c_email").value.trim() });
+  $("#c_terms").oninput  = () => c.termsDays = Math.max(0, parseInt($("#c_terms").value || "0", 10));
+  $("#c_limit").oninput  = () => c.creditLimit = round2($("#c_limit").value || 0);
+  $("#c_tax").onchange   = () => c.taxExempt = $("#c_tax").checked;
+  $("#c_open").oninput   = () => c.openingBalance = round2($("#c_open").value || 0);
 
+  // Archive / Unarchive
   if ($("#cust_archive")) {
     $("#cust_archive").onclick = async () => {
       c.archived = !c.archived;
       await put("customers", c);
       toast(c.archived ? "Customer archived" : "Customer unarchived");
+
       m.close();
-      renderCustomers();
+      // Refresh the list the user is currently on
+      if (inArchivedView) {
+        renderCustomers({ archived: true });
+      } else {
+        renderCustomers({ archived: false });
+      }
     };
   }
 
+  // Save / Create
   $("#cust_save").onclick = async () => {
     if (!c.name) return toast("Name is required", "warn");
-    if (!c.code) c.code = (c.name || "").toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 10) || "CUST";
-    // unique code safeguard
+    if (!c.code)
+      c.code = (c.name || "").toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 10) || "CUST";
+
+    // Unique code safeguard
     const allC = await all("customers");
-    const dup = allC.find(x => x.code === c.code && x.id !== c.id);
+    const dup = (allC || []).find(x => x.code === c.code && x.id !== c.id);
     if (dup) return toast("Code already in use", "warn");
 
     await put("customers", c);
     toast(editing ? "Customer updated" : "Customer created", "success");
     m.close();
-    renderCustomers();
+
+    // After save, return to whichever list the user was on
+    if (inArchivedView) {
+      renderCustomers({ archived: true });
+    } else {
+      renderCustomers({ archived: false });
+    }
   };
 }
+
+// Route helpers (export)
+window.renderCustomers = () => renderCustomers({ archived: false });
+window.renderCustomersArchived = () => renderCustomers({ archived: true });
