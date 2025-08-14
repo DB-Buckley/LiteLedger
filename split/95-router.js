@@ -11,7 +11,10 @@
     "/customers": "renderCustomers",
     "/customers-archived": "renderCustomersArchived",
 
+
     "/suppliers": "renderSuppliers",
+    "/suppliers-archived": "renderSuppliersArchived",
+    
     "/items": "renderItems",
     "/purchases": "renderPurchases",
 
