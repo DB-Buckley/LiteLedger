@@ -1,15 +1,16 @@
 // ============================================================================
 // Router (hash-based)
 // Depends on: page renderers exposed on window, e.g. window.renderDashboard()
-// Robust against load order by resolving function names at runtime.
 // ============================================================================
 
 (function () {
-  // Map paths to global function names (resolve at call time)
   const ROUTES = {
     "/": "renderDashboard",
     "/dashboard": "renderDashboard",
+
     "/customers": "renderCustomers",
+    "/customers-archived": "renderCustomersArchived",
+
     "/suppliers": "renderSuppliers",
     "/items": "renderItems",
     "/purchases": "renderPurchases",
