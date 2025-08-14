@@ -1,17 +1,15 @@
 // ===========================================================================
 // 50-sales-documents-quotes-orders-invoices.js
-// Sales Documents (Quotes / Orders / Invoices) with History flows:
-// Quote -> Sales Order (then Quote moves to Quotes History),
-// Sales Order -> Invoice (then Order moves to Sales Order History).
+// Sales Documents (Quotes / Orders / Invoices) with History flows and
+// archived-customer filtering (archived customers excluded from new docs).
 //
-// Depends on: 01-db.js, 02-helpers.js ( $, $$, all, get, put, add, del,
-// whereIndex, nextDocNo, randId, nowISO, sumDoc, calcLineTotals, currency, toast )
+// Depends on: 01-db.js, 02-helpers.js
 // Optional: adjustStockOnInvoice
-// Works with: 60-pdf.js (window.getInvoiceHTML(docId, {doc, lines}) -> {title, html})
+// Works with: 60-pdf.js (window.getInvoiceHTML)
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE", opts = {}) {
-  const history = !!opts.history; // show converted docs when true
+  const history = !!opts.history;
   const v = $("#view");
   if (!v) return;
 
@@ -99,7 +97,7 @@ async function renderSales(kind = "INVOICE", opts = {}) {
   // View
   $$("#d_rows [data-view]").forEach((b) =>
     (b.onclick = () => {
-      const ro = history && (isQuotes || isOrders); // history docs open read-only
+      const ro = history && (isQuotes || isOrders);
       openDocForm(kind, b.dataset.view, { readOnly: ro });
     })
   );
@@ -107,7 +105,11 @@ async function renderSales(kind = "INVOICE", opts = {}) {
 
 async function openDocForm(kind, docId, opts = {}) {
   const editing = docId ? await get("docs", docId) : null;
-  const customers = await all("customers");
+
+  // Load customers and split into active/archived; only ACTIVE appear in dropdowns.
+  const allCustomers = (await all("customers")) || [];
+  const activeCustomers = allCustomers.filter((c) => !c.archived);
+
   const settingsRec = await get("settings", "app");
   const settings = settingsRec?.value || {};
   const allItemsRaw = await all("items");
@@ -127,7 +129,7 @@ async function openDocForm(kind, docId, opts = {}) {
     id: randId(),
     type: kind,
     no: await nextDocNo(kind),
-    customerId: customers[0]?.id || "",
+    customerId: activeCustomers[0]?.id || "", // default to first ACTIVE customer
     warehouseId: "WH1",
     dates: { issue: nowISO().slice(0, 10), due: nowISO().slice(0, 10) },
     totals: { subTotal: 0, tax: 0, grandTotal: 0 },
@@ -136,7 +138,11 @@ async function openDocForm(kind, docId, opts = {}) {
   };
   const lines = editing ? await whereIndex("lines", "by_doc", doc.id) : [];
 
-  // Read-only in history or when converted
+  // If this doc’s customer is archived, we still show it (disabled) so the doc can be viewed.
+  const theCustomer = allCustomers.find((c) => c.id === doc.customerId);
+  const customerIsArchived = !!theCustomer?.archived;
+
+  // Read-only if converted/history as before
   const readOnly =
     !!opts.readOnly || doc.status === "CONVERTED" || !!doc.readOnly || !!doc.convertedToId;
 
@@ -148,9 +154,21 @@ async function openDocForm(kind, docId, opts = {}) {
   }
 
   // ---------- helpers ----------
-  const custOpts = (customers || [])
-    .map((c) => `<option value="${c.id}" ${c.id === doc.customerId ? "selected" : ""}>${c.name}</option>`)
+  const custOptsActive = activeCustomers
+    .map(
+      (c) => `<option value="${c.id}" ${c.id === doc.customerId ? "selected" : ""}>${c.name}</option>`
+    )
     .join("");
+
+  const custArchivedOption =
+    customerIsArchived
+      ? `<option value="${theCustomer.id}" selected disabled>${theCustomer.name} (archived)</option>`
+      : "";
+
+  const custSelectHtml = `
+    <select id="sd_cust" ${readOnly ? "disabled" : ""}>
+      ${custArchivedOption}${custOptsActive}
+    </select>`;
 
   const renderLineRow = (ln, idx, ro) =>
     ro
@@ -245,7 +263,7 @@ async function openDocForm(kind, docId, opts = {}) {
       discountPct: 0,
       taxRate: settings.vatRate ?? 15,
     });
-    draw(); // re-render table
+    draw();
     recalc();
   }
 
@@ -261,7 +279,7 @@ async function openDocForm(kind, docId, opts = {}) {
     );
   }
 
-  // PDF module loader
+  // PDF loader (unchanged)
   async function ensurePdfModule() {
     if (typeof window.getInvoiceHTML === "function") return true;
     if (window.__pdfModuleLoading) {
@@ -315,26 +333,12 @@ async function openDocForm(kind, docId, opts = {}) {
     const btnClose = overlay.querySelector("#pdf_close");
 
     const idoc = iframe.contentDocument;
-    try {
-      idoc.open();
-      idoc.write(html);
-      idoc.close();
-    } catch (e) {
-      console.error(e);
-    }
+    try { idoc.open(); idoc.write(html); idoc.close(); } catch (e) { console.error(e); }
 
-    btnPrint.onclick = () => {
-      try {
-        iframe.contentWindow.focus();
-        iframe.contentWindow.print();
-      } catch (e) {
-        console.error(e);
-      }
-    };
+    btnPrint.onclick = () => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { console.error(e); } };
     btnClose.onclick = () => overlay.remove();
   }
 
-  // Single in-dialog item picker
   function openItemPicker({ initialQuery = "" } = {}) {
     if (readOnly) return;
     const host = document.getElementById("modal") || document.body;
@@ -403,36 +407,21 @@ async function openDocForm(kind, docId, opts = {}) {
         const addBtn = tr.querySelector("[data-add]");
         const getQty = () => Number(qtyEl?.value || 1) || 1;
 
-        addBtn.onclick = (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          addLineFromItem(it, getQty());
-          closePicker();
-        };
-        tr.ondblclick = () => {
-          addLineFromItem(it, getQty());
-          closePicker();
-        };
+        addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); addLineFromItem(it, getQty()); closePicker(); };
+        tr.ondblclick = () => { addLineFromItem(it, getQty()); closePicker(); };
       });
 
       search.onkeydown = (e) => {
         if (e.key === "Enter" && filtered.length === 1) {
-          e.preventDefault();
-          e.stopPropagation();
+          e.preventDefault(); e.stopPropagation();
           addLineFromItem(filtered[0], 1);
           closePicker();
         }
       };
     };
 
-    wrap.addEventListener("click", (e) => {
-      if (e.target === wrap) closePicker();
-    });
-    btnDone.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      closePicker();
-    };
+    wrap.addEventListener("click", (e) => { if (e.target === wrap) closePicker(); });
+    btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closePicker(); };
     search.oninput = () => render(search.value);
 
     render(initialQuery);
@@ -449,16 +438,8 @@ async function openDocForm(kind, docId, opts = {}) {
           ${readOnly ? "" : `<input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">`}
           ${readOnly ? "" : `<button type="button" class="btn" id="sd_add">+ Add Item</button>`}
           <button type="button" class="btn" id="sd_pdf">PDF</button>
-          ${
-            !readOnly && editing && kind === "QUOTE"
-              ? `<button type="button" class="btn" id="sd_convert">Convert → Sales Order</button>`
-              : ""
-          }
-          ${
-            !readOnly && editing && kind === "ORDER"
-              ? `<button type="button" class="btn" id="sd_convert">Convert → Invoice</button>`
-              : ""
-          }
+          ${!readOnly && editing && kind === "QUOTE" ? `<button type="button" class="btn" id="sd_convert">Convert → Sales Order</button>` : ""}
+          ${!readOnly && editing && kind === "ORDER" ? `<button type="button" class="btn" id="sd_convert">Convert → Invoice</button>` : ""}
           ${!readOnly && editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
           ${!readOnly ? `<button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>` : ""}
           <button type="button" class="btn" id="sd_close">Close</button>
@@ -467,9 +448,7 @@ async function openDocForm(kind, docId, opts = {}) {
       <div class="bd">
         <div class="form-grid" style="margin-bottom:10px">
           <label class="input"><span>No</span><input id="sd_no" value="${doc.no}" disabled></label>
-          <label class="input"><span>Customer</span>
-            <select id="sd_cust" ${readOnly ? "disabled" : ""}>${custOpts}</select>
-          </label>
+          <label class="input"><span>Customer</span>${custSelectHtml}</label>
           <label class="input"><span>Date</span><input id="sd_date" type="date" value="${(doc.dates?.issue || "").slice(0, 10)}" ${readOnly ? "disabled" : ""}></label>
           <label class="input"><span>Due</span><input id="sd_due" type="date" value="${(doc.dates?.due || "").slice(0, 10)}" ${readOnly ? "disabled" : ""}></label>
           <label class="input"><span>Warehouse</span><input id="sd_wh" value="${doc.warehouseId || "WH1"}" ${readOnly ? "disabled" : ""}></label>
@@ -497,37 +476,23 @@ async function openDocForm(kind, docId, opts = {}) {
 
     // Close
     actions.querySelector("#sd_close").addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      m.close();
+      e.preventDefault(); e.stopPropagation(); m.close();
     });
 
     if (!readOnly) {
-      // Add Item (picker)
-      actions.querySelector("#sd_add").addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openItemPicker();
-      });
-
-      // Code entry
+      // Add item & code entry
+      actions.querySelector("#sd_add").addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openItemPicker(); });
       const codeEl = $("#sd_code");
       codeEl?.addEventListener("keydown", (e) => {
         if (e.key !== "Enter") return;
-        e.preventDefault();
-        e.stopPropagation();
+        e.preventDefault(); e.stopPropagation();
         const code = (codeEl.value || "").trim();
         if (!code) return;
         const matches = findMatchesByCode(code);
-        if (matches.length === 1) {
-          addLineFromItem(matches[0], 1);
-          codeEl.value = "";
-        } else {
-          openItemPicker({ initialQuery: code });
-        }
+        if (matches.length === 1) { addLineFromItem(matches[0], 1); codeEl.value = ""; }
+        else { openItemPicker({ initialQuery: code }); }
       });
 
-      // Header inputs
       $("#sd_cust").onchange = () => (doc.customerId = $("#sd_cust").value);
       $("#sd_date").onchange = () => (doc.dates.issue = $("#sd_date").value);
       $("#sd_due").onchange = () => (doc.dates.due = $("#sd_due").value);
@@ -536,9 +501,7 @@ async function openDocForm(kind, docId, opts = {}) {
 
       // Save / Create
       actions.querySelector("#sd_save").addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
+        e.preventDefault(); e.stopPropagation();
         recalc();
         await put("docs", doc);
 
@@ -546,31 +509,21 @@ async function openDocForm(kind, docId, opts = {}) {
           const existing = await whereIndex("lines", "by_doc", doc.id);
           await Promise.all(existing.map((ln) => del("lines", ln.id)));
         }
-        for (const ln of lines) {
-          ln.docId = doc.id;
-          await put("lines", ln);
-        }
+        for (const ln of lines) { ln.docId = doc.id; await put("lines", ln); }
         if (kind === "INVOICE" && typeof adjustStockOnInvoice === "function") {
           await adjustStockOnInvoice(doc, lines);
         }
-
         toast(editing ? `${kind} updated` : `${kind} created`);
         m.close();
-        renderSales(kind); // stay on same section
+        renderSales(kind); // stay in section
       });
 
-      // Convert flows (stay on same section, close modal)
+      // Convert (unchanged behavior: close modal, stay in list)
       const convertBtn = $("#sd_convert");
       if (convertBtn && kind === "QUOTE") {
-        // Quote -> Sales Order
         convertBtn.onclick = async (e) => {
           e.preventDefault(); e.stopPropagation();
-          if (doc.convertedToId) {
-            toast("Already converted to Sales Order");
-            m.close();
-            renderSales("QUOTE");
-            return;
-          }
+          if (doc.convertedToId) { toast("Already converted to Sales Order"); m.close(); renderSales("QUOTE"); return; }
           if (!confirm("Convert this Quote to a Sales Order?")) return;
 
           const newId = randId();
@@ -578,47 +531,28 @@ async function openDocForm(kind, docId, opts = {}) {
           const issue = nowISO().slice(0, 10);
           const order = {
             id: newId, type: "ORDER", no: soNo,
-            customerId: doc.customerId,
-            warehouseId: doc.warehouseId || "WH1",
-            dates: { issue, due: issue },
-            totals: { subTotal: 0, tax: 0, grandTotal: 0 },
-            notes: doc.notes || "",
-            createdAt: nowISO(),
-            sourceId: doc.id, sourceType: "QUOTE",
+            customerId: doc.customerId, warehouseId: doc.warehouseId || "WH1",
+            dates: { issue, due: issue }, totals: { subTotal: 0, tax: 0, grandTotal: 0 },
+            notes: doc.notes || "", createdAt: nowISO(), sourceId: doc.id, sourceType: "QUOTE",
           };
           await put("docs", order);
-
           for (const ln of lines) await put("lines", { ...ln, id: randId(), docId: newId });
 
           const soLines = await whereIndex("lines", "by_doc", newId);
           const totals = sumDoc(soLines.map(l => ({
-            qty: l.qty,
-            unitPrice: l.unitPrice ?? 0,
-            discountPct: l.discountPct,
-            taxRate: l.taxRate ?? (settings.vatRate ?? 15),
+            qty: l.qty, unitPrice: l.unitPrice ?? 0, discountPct: l.discountPct, taxRate: l.taxRate ?? (settings.vatRate ?? 15),
           })));
-          order.totals = totals;
-          await put("docs", order);
+          order.totals = totals; await put("docs", order);
 
-          doc.convertedToId = newId;
-          doc.status = "CONVERTED";
-          doc.readOnly = true;
-          await put("docs", doc);
+          doc.convertedToId = newId; doc.status = "CONVERTED"; doc.readOnly = true; await put("docs", doc);
 
           toast("Sales Order created from Quote");
-          m.close();
-          renderSales("QUOTE"); // remain in Quotes; refresh list (quote moves to history)
+          m.close(); renderSales("QUOTE");
         };
       } else if (convertBtn && kind === "ORDER") {
-        // Sales Order -> Invoice
         convertBtn.onclick = async (e) => {
           e.preventDefault(); e.stopPropagation();
-          if (doc.convertedToId) {
-            toast("Already converted to Invoice");
-            m.close();
-            renderSales("ORDER");
-            return;
-          }
+          if (doc.convertedToId) { toast("Already converted to Invoice"); m.close(); renderSales("ORDER"); return; }
           if (!confirm("Convert this Sales Order to an Invoice?")) return;
 
           const newId = randId();
@@ -628,54 +562,36 @@ async function openDocForm(kind, docId, opts = {}) {
           try {
             const cust = doc.customerId ? await get("customers", doc.customerId) : null;
             const days = Number(cust?.termsDays) || 0;
-            if (days > 0) {
-              const d = new Date(issue);
-              d.setDate(d.getDate() + days);
-              due = d.toISOString().slice(0, 10);
-            }
+            if (days > 0) { const d = new Date(issue); d.setDate(d.getDate() + days); due = d.toISOString().slice(0, 10); }
           } catch (_) {}
 
           const inv = {
             id: newId, type: "INVOICE", no: invNo,
-            customerId: doc.customerId,
-            warehouseId: doc.warehouseId || "WH1",
-            dates: { issue, due },
-            totals: { subTotal: 0, tax: 0, grandTotal: 0 },
-            notes: doc.notes || "",
-            createdAt: nowISO(),
-            sourceId: doc.id, sourceType: "ORDER",
+            customerId: doc.customerId, warehouseId: doc.warehouseId || "WH1",
+            dates: { issue, due }, totals: { subTotal: 0, tax: 0, grandTotal: 0 },
+            notes: doc.notes || "", createdAt: nowISO(), sourceId: doc.id, sourceType: "ORDER",
           };
           await put("docs", inv);
-
           for (const ln of lines) await put("lines", { ...ln, id: randId(), docId: newId });
 
           const invLines = await whereIndex("lines", "by_doc", newId);
           const totals = sumDoc(invLines.map(l => ({
-            qty: l.qty,
-            unitPrice: l.unitPrice ?? 0,
-            discountPct: l.discountPct,
-            taxRate: l.taxRate ?? (settings.vatRate ?? 15),
+            qty: l.qty, unitPrice: l.unitPrice ?? 0, discountPct: l.discountPct, taxRate: l.taxRate ?? (settings.vatRate ?? 15),
           })));
-          inv.totals = totals;
-          await put("docs", inv);
+          inv.totals = totals; await put("docs", inv);
 
-          doc.convertedToId = newId;
-          doc.status = "CONVERTED";
-          doc.readOnly = true;
-          await put("docs", doc);
+          doc.convertedToId = newId; doc.status = "CONVERTED"; doc.readOnly = true; await put("docs", doc);
 
           toast("Invoice created from Sales Order");
-          m.close();
-          renderSales("ORDER"); // remain in Orders; refresh list (order moves to history)
+          m.close(); renderSales("ORDER");
         };
       }
 
-      // Delete (with stock reversal for invoices)
+      // Delete (same as before)
       const delBtn = $("#sd_delete");
       if (delBtn) {
         delBtn.addEventListener("click", async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
+          e.preventDefault(); e.stopPropagation();
           if (!confirm(`Delete this ${kind}?`)) return;
 
           if (kind === "INVOICE") {
@@ -683,15 +599,10 @@ async function openDocForm(kind, docId, opts = {}) {
               const item = await get("items", ln.itemId);
               if (!item || item.nonStock) continue;
               await add("movements", {
-                id: randId(),
-                itemId: item.id,
-                warehouseId: doc.warehouseId || "WH1",
-                type: "SALE_REVERSE",
-                qtyDelta: +ln.qty,
+                id: randId(), itemId: item.id, warehouseId: doc.warehouseId || "WH1",
+                type: "SALE_REVERSE", qtyDelta: +ln.qty,
                 costImpact: -round2((item.costAvg || 0) * (+ln.qty || 0)),
-                relatedDocId: doc.id,
-                timestamp: nowISO(),
-                note: `Delete ${doc.no}`,
+                relatedDocId: doc.id, timestamp: nowISO(), note: `Delete ${doc.no}`,
               });
             }
           }
@@ -706,26 +617,17 @@ async function openDocForm(kind, docId, opts = {}) {
       }
     }
 
-    // PDF (works for both read-only and editable)
+    // PDF
     actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
+      e.preventDefault(); e.stopPropagation();
       const ok = await ensurePdfModule();
-      if (!ok || typeof window.getInvoiceHTML !== "function") {
-        toast?.("PDF module not available (60-pdf.js)");
-        return;
-      }
+      if (!ok || typeof window.getInvoiceHTML !== "function") { toast?.("PDF module not available (60-pdf.js)"); return; }
       try {
         const { title, html } = await window.getInvoiceHTML(doc.id, { doc, lines });
         showPdfOverlay(html, title);
-      } catch (err) {
-        console.error(err);
-        toast?.("PDF render failed");
-      }
+      } catch (err) { console.error(err); toast?.("PDF render failed"); }
     });
 
-    // Rows
     wireAllRows();
   };
 
