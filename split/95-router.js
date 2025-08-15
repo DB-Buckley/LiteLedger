@@ -20,7 +20,7 @@
 
     // Purchases
     "/purchases": "renderPurchases",
-    "/purchases-processed": "renderPurchasesProcessed",      // optional, for processed PINVs
+    "/purchases-processed": "renderPurchasesProcessed",
     "/supplier-payments": "renderSupplierPayments",
 
     // Sales
@@ -40,22 +40,31 @@
   const LAZY = [
     { test: /^\/(quotes|quotes-history|orders|orders-history|invoices)(\/|$)?/i,
       files: ["/split/50-sales-documents-quotes-orders-invoices.js", "/50-sales-documents-quotes-orders-invoices.js"] },
+
     { test: /^\/(purchases|purchases-processed|supplier-payments)(\/|$)?/i,
       files: ["/split/50-purchases.js", "/50-purchases.js"] },
+
     { test: /^\/(customers|customers-archived)(\/|$)?/i,
       files: ["/20-customers.js"] },
+
     { test: /^\/(suppliers|suppliers-archived)(\/|$)?/i,
       files: ["/20-suppliers.js"] },
+
     { test: /^\/items(\/|$)?/i,
       files: ["/30-items.js"] },
+
     { test: /^\/layouts(\/|$)?/i,
       files: ["/40-layouts.js"] },
+
     { test: /^\/payments(\/|$)?/i,
       files: ["/70-payments.js"] },
+
     { test: /^\/settings(\/|$)?/i,
       files: ["/80-settings.js"] },
+
     { test: /^\/about(\/|$)?/i,
       files: ["/90-about.js"] },
+
     { test: /^\/(dashboard|)$/i,
       files: ["/10-dashboard.js"] },
   ];
@@ -86,7 +95,7 @@
       try {
         await loadScriptOnce(f);
         return true;
-      } catch (_) {
+      } catch {
         // try next candidate
       }
     }
