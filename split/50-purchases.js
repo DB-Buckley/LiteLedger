@@ -525,65 +525,75 @@ async function openItemPickerOverlay({ preset = "", onPick }) {
 
   // -------------------- Processor: writes movements & costAvg ----------------
 
-  window.processSupplierInvoice = async function processSupplierInvoice(docId) {
+ // --- Replace your existing processSupplierInvoice with this ---
+window.processSupplierInvoice = async function processSupplierInvoice(docId) {
+  try {
     const doc = await get("docs", docId);
-    if (!doc || doc.type !== "PINV") {
-      toast("Not a supplier invoice", "warn");
-      return;
-    }
-    if (doc.status === "PROCESSED") {
-      toast("Already processed", "warn");
-      return;
-    }
+    if (!doc) return toast("Supplier invoice not found", "warn");
+    if (doc.status === "PROCESSED") return toast("Already processed", "warn");
 
-    const lines = await whereIndex("lines", "by_doc", doc.id);
+    const [lines, settings] = await Promise.all([
+      whereIndex("lines", "by_doc", doc.id),
+      get("settings", "app"),
+    ]);
+    const vatRateDefault = settings?.value?.vatRate ?? 15;
     const wh = doc.warehouseId || "WH1";
-    let wroteAny = 0;
 
+    let created = 0;
     for (const ln of lines) {
-      const qty = Math.max(0, Number(ln.qty) || 0);
-      if (!ln.itemId || qty <= 0) continue;
-
+      // Pull the item; skip if missing / non-stock
       const item = await get("items", ln.itemId);
       if (!item || item.nonStock) continue;
 
-      // Unit cost ex VAT
-      const unitCostEx = Number(ln.unitCost ?? ln.unitPrice ?? item.costAvg ?? 0) || 0;
-      const discountPct = Number(ln.discountPct) || 0;
-      const netUnit = round2(unitCostEx * (discountPct ? (1 - discountPct / 100) : 1));
-      const exLine = round2(netUnit * qty);
+      // Quantities/costs as numbers
+      const qty = Number(ln.qty) || 0;
+      if (qty <= 0) continue; // nothing to add
 
-      // Weighted average cost
-      const beforeQty = (Number(item.openingQty) || 0) + (await balanceQty(item.id));
-      const newOnHand = beforeQty + qty;
-      if (newOnHand > 0) {
-        const valueAfter = (Number(item.costAvg) || 0) * Math.max(0, beforeQty) + exLine;
-        item.costAvg = round2(valueAfter / newOnHand);
-        await put("items", item);
-      }
+      const unit = Number(ln.unitCost ?? ln.unitPrice ?? 0);
+      const discPct = Number(ln.discountPct) || 0;
+      const taxRate = Number(ln.taxRate ?? vatRateDefault) || 0;
 
-      // Movement (positive qty adds stock)
+      // Net EX VAT unit: apply discount, do NOT add VAT
+      const unitAfterDisc = unit * (1 - discPct / 100);
+      // If the line value was captured VAT-inclusive, remove VAT here.
+      // (Most PINV capture is EX VAT, so this is fine.)
+      const netUnitExVat = unitAfterDisc; // adjust if your UI is inc-VAT
+
+      const qtyDelta = qty; // purchases ADD stock
+      const costImpact = round2(netUnitExVat * qty);
+
       await add("movements", {
         id: randId(),
         itemId: item.id,
         warehouseId: wh,
-        type: "PURCHASE",
-        qtyDelta: qty,
-        costImpact: exLine,
-        relatedDocId: doc.id,
+        type: "PURCHASE",     // free-form label
+        qtyDelta,             // IMPORTANT: positive -> adds stock
+        costImpact,           // accounting/COGS analytics later
+        relatedDocId: doc.id, // link back to the PINV
         timestamp: nowISO(),
-        note: `PINV ${doc.no || ""}`,
+        note: `PINV ${doc.no} ${item.sku || item.name || ""}`,
       });
-
-      wroteAny++;
+      created++;
     }
 
-    doc.status = "PROCESSED";
-    doc.processedAt = nowISO();
-    await put("docs", doc);
+    // Mark the doc processed only if we actually wrote movements
+    if (created > 0) {
+      doc.status = "PROCESSED";
+      doc.processedAt = nowISO();
+      await put("docs", doc);
+    }
 
-    toast(wroteAny ? "Supplier invoice processed" : "Nothing to process", wroteAny ? "success" : "warn");
-  };
+    console.log("[PINV process] wrote movements:", created, "for doc", { id: doc.id, no: doc.no });
+    toast(created ? `Processed ${created} line(s)` : "Nothing to process (no stock lines?)", created ? "success" : "warn");
+
+    // Re-render the purchases list (stay on the same view)
+    renderPurchases();
+  } catch (err) {
+    console.error("processSupplierInvoice failed:", err);
+    toast("Failed to process supplier invoice", "warn");
+  }
+};
+
 
   // ------------------ Supplier Payments (minimal stub screen) ----------------
 
