@@ -7,10 +7,11 @@
 // Optional: adjustStockOnInvoice (called for INVOICE saves)
 // Works with: 60-pdf.js (window.getInvoiceHTML for overlay preview)
 //
-// Added:
-// - Credit Notes (SCN) for Invoices (no hard delete for customer invoices)
-// - "Credit" button on Invoice modal
-// - Delete is hidden/blocked for Invoices (use Credit instead)
+// Added in this revision:
+// - Fix: "Add Item" opens the item picker modal for Quotes/Orders/Invoices.
+// - Credit Notes (SCN) and "Credited Invoices" view toggle.
+// - Delete is blocked for Invoices: use Credit instead.
+// - Inline PDF overlay viewer.
 // ===========================================================================
 
 const __CREDIT_CFG = {
@@ -60,8 +61,7 @@ const __CREDIT_CFG = {
 // Credits (SCN) — create from an Invoice
 // Public: window.openCreditNoteWizard(invoiceId)
 // ===========================================================================
-
-(async function attachCreditsAPI() {
+(function attachCreditsAPI() {
   if (window.openCreditNoteWizard) return;
 
   function ensureAppModal() {
@@ -145,7 +145,7 @@ const __CREDIT_CFG = {
         unitPrice: Number(ln.unitPrice ?? ln.unitCost ?? 0),
         discountPct: Number(ln.discountPct ?? 0),
         taxRate: Number(ln.taxRate ?? vatDefault),
-        sourceLineId: ln.id, // helpful for audits
+        sourceLineId: ln.id,
       });
     }
 
@@ -283,22 +283,36 @@ const __CREDIT_CFG = {
 })();
 
 // ===========================================================================
-// Existing Sales List + Form
+// Sales list + forms
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE", opts = {}) {
-  const history = !!opts.history;
+  const credited = !!opts.credited;      // for Invoices: show only those with credits
+  const history = !!opts.history;        // for Quotes/Orders older/converted
   const v = $("#view");
   if (!v) return;
 
   const allDocs = await all("docs");
   let docs = (allDocs || []).filter((d) => d.type === kind);
 
-  // Active vs History split
-  if (history) {
-    docs = docs.filter((d) => d.status === "CONVERTED" || d.readOnly || d.convertedToId);
-  } else {
-    docs = docs.filter((d) => !(d.status === "CONVERTED" || d.readOnly || d.convertedToId));
+  // For INVOICE: credited toggle
+  if (kind === "INVOICE") {
+    const credits = (allDocs || []).filter(d => d.type === __CREDIT_CFG.CREDIT_DOC_TYPE);
+    const creditedSet = new Set(credits.map(c => c.relatedDocId).filter(Boolean));
+    if (credited) {
+      docs = docs.filter(d => creditedSet.has(d.id));
+    } else {
+      docs = docs.filter(d => !creditedSet.has(d.id));
+    }
+  }
+
+  // Active vs History split for Quotes/Orders
+  if (kind === "QUOTE" || kind === "ORDER") {
+    if (history) {
+      docs = docs.filter((d) => d.status === "CONVERTED" || d.readOnly || d.convertedToId);
+    } else {
+      docs = docs.filter((d) => !(d.status === "CONVERTED" || d.readOnly || d.convertedToId));
+    }
   }
 
   docs.sort((a, b) => (b.dates?.issue || "").localeCompare(a.dates?.issue || ""));
@@ -308,10 +322,11 @@ async function renderSales(kind = "INVOICE", opts = {}) {
 
   const isQuotes = kind === "QUOTE";
   const isOrders = kind === "ORDER";
+  const isInvoices = kind === "INVOICE";
   const label =
-    history && isQuotes ? "Quotes History" :
-    history && isOrders ? "Sales Order History" :
-    `${kind}s`;
+    isQuotes ? (history ? "Quotes History" : "Quotes")
+    : isOrders ? (history ? "Sales Order History" : "Sales Orders")
+    : (credited ? "Credited Invoices" : "Invoices");
 
   v.innerHTML = `
   <div class="card">
@@ -330,7 +345,10 @@ async function renderSales(kind = "INVOICE", opts = {}) {
                 ? `<button type="button" class="btn" id="d_back_orders">Active Orders</button>`
                 : `<button type="button" class="btn" id="d_orders_history">Sales Order History</button>
                    <button type="button" class="btn primary" id="d_new">+ New Order</button>`)
-            : `<button type="button" class="btn primary" id="d_new">+ New ${kind}</button>`
+            : (credited
+                ? `<button type="button" class="btn" id="d_invoices_active">Active Invoices</button>`
+                : `<button type="button" class="btn" id="d_invoices_credited">Credited Invoices</button>
+                   <button type="button" class="btn primary" id="d_new">+ New Invoice</button>`)
         }
       </div>
     </div>
@@ -368,6 +386,8 @@ async function renderSales(kind = "INVOICE", opts = {}) {
   $("#d_back_active")?.addEventListener("click", () => (location.hash = "#/quotes"));
   $("#d_orders_history")?.addEventListener("click", () => (location.hash = "#/orders-history"));
   $("#d_back_orders")?.addEventListener("click", () => (location.hash = "#/orders"));
+  $("#d_invoices_credited")?.addEventListener("click", () => (location.hash = "#/invoices-credited"));
+  $("#d_invoices_active")?.addEventListener("click", () => (location.hash = "#/invoices"));
 
   // New
   $("#d_new")?.addEventListener("click", () => openDocForm(kind));
@@ -382,7 +402,8 @@ async function renderSales(kind = "INVOICE", opts = {}) {
 }
 
 async function openDocForm(kind, docId, opts = {}) {
-  const editing = docId ? await get("docs", docId) : null;
+  const editing = !!docId;
+  const existing = editing ? await get("docs", docId) : null;
 
   // Customers: exclude archived from dropdowns (but show archived if the doc uses one)
   const allCustomers = (await all("customers")) || [];
@@ -403,7 +424,7 @@ async function openDocForm(kind, docId, opts = {}) {
     sellPrice: Number(raw.sellPrice ?? raw.price ?? raw.unitPrice ?? raw.defaultPrice ?? 0) || 0,
   }));
 
-  const doc = editing || {
+  const doc = existing || {
     id: randId(),
     type: kind,
     no: await nextDocNo(kind),
@@ -467,7 +488,7 @@ async function openDocForm(kind, docId, opts = {}) {
       <td><input type="number" step="0.01"  min="0" value="${ln.discountPct || 0}" data-edit="discountPct"></td>
       <td><input type="number" step="0.01"  min="0" value="${ln.taxRate ?? settings.vatRate ?? 15}" data-edit="taxRate"></td>
       <td class="r">${currency(calcLineTotals({
-        qty: ln.qty, unitPrice: ln.unitPrice ?? 0, discountPct: ln.discountPct, taxRate: ln.taxRate ?? settings.vatRate ?? 15
+        qty: ln.qty, unitPrice: ln.unitPrice ?? 0, discountPct: ln.discountPct, taxRate: ln.taxRate ?? 15
       }).incTax)}</td>
       <td><button type="button" class="btn warn" data-del="${idx}">×</button></td>
     </tr>`;
@@ -552,6 +573,113 @@ async function openDocForm(kind, docId, opts = {}) {
         (it.sku && it.sku.toLowerCase() === q) ||
         (it.code && it.code.toLowerCase() === q)
     );
+  }
+
+  // ---- Item Picker Overlay (sales) ----
+  function openItemPicker(opts = {}) {
+    const initialQuery = (opts.initialQuery || "").toLowerCase();
+    const host = document.getElementById("modal") || document.body;
+
+    // Remove stale
+    document.getElementById("sd_picker_overlay")?.remove();
+
+    const wrap = document.createElement("div");
+    wrap.id = "sd_picker_overlay";
+    wrap.tabIndex = -1;
+    wrap.style.cssText = `
+      position:fixed; inset:0; z-index:100000;
+      background:rgba(2,6,23,.85);
+      display:flex; align-items:center; justify-content:center;
+    `;
+    wrap.addEventListener("keydown", (e) => e.stopPropagation(), { capture: true });
+
+    const card = document.createElement("div");
+    card.style.cssText = `
+      width:min(900px,94vw); max-height:80vh;
+      background:#0f172a; color:#e2e8f0;
+      border:1px solid #1f2937; border-radius:14px;
+      box-shadow:0 20px 60px rgba(0,0,0,.55);
+      display:flex; flex-direction:column; overflow:hidden;
+    `;
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#0b1220;border-bottom:1px solid #1f2937">
+        <b>Select Item</b>
+        <button type="button" class="btn" id="sd_picker_close">Close</button>
+      </div>
+      <div style="padding:12px 16px; display:grid; gap:10px; background:#0f172a">
+        <input id="sd_picker_q" placeholder="Search code / name / barcode"
+               style="min-width:320px;background:#0b1220;color:#e2e8f0;border:1px solid #1f2937;border-radius:8px;padding:8px 10px;">
+        <div style="overflow:auto; max-height:52vh; border:1px solid #1f2937; border-radius:10px">
+          <table class="table" style="width:100%">
+            <thead>
+              <tr style="background:#0b1220"><th>SKU</th><th>Name</th><th class="r">On Hand</th><th class="r">Price</th><th></th></tr>
+            </thead>
+            <tbody id="sd_picker_rows"></tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    wrap.appendChild(card);
+    host.appendChild(wrap);
+
+    const close = () => wrap.remove();
+    document.getElementById("sd_picker_close").onclick = (e) => { e.preventDefault(); e.stopPropagation(); close(); };
+
+    function rowsHtml(list) {
+      return (list || []).map((it) => `
+        <tr data-id="${it.id}">
+          <td>${it.sku || it.code || ""}</td>
+          <td>${it.name || ""}</td>
+          <td class="r" data-oh="oh-${it.id}">…</td>
+          <td class="r">${currency(it.sellPrice ?? 0)}</td>
+          <td><button type="button" class="btn" data-pick="${it.id}">Add</button></td>
+        </tr>
+      `).join("");
+    }
+
+    function wireList(list) {
+      const tbody = document.getElementById("sd_picker_rows");
+      if (!tbody) return;
+      tbody.innerHTML = rowsHtml(list);
+      tbody.querySelectorAll("[data-pick]").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const it = list.find((x) => x.id === btn.dataset.pick);
+          if (it) {
+            addLineFromItem(it, 1);
+            close();
+          }
+        }, { capture: true });
+      });
+    }
+
+    const base = items.slice();
+    const q = document.getElementById("sd_picker_q");
+    const doSearch = () => {
+      const s = (q.value || "").toLowerCase();
+      const filtered = base.filter((i) =>
+        (i.sku || i.code || "").toLowerCase().includes(s) ||
+        (i.name || "").toLowerCase().includes(s) ||
+        String(i.barcode || "").toLowerCase().includes(s)
+      );
+      wireList(filtered);
+    };
+    q.oninput = doSearch;
+    q.value = initialQuery;
+    doSearch();
+
+    // Fill on-hand
+    (async () => {
+      for (const it of base) {
+        const el = wrap.querySelector(`[data-oh="oh-${it.id}"]`);
+        if (!el) continue;
+        try {
+          const bal = await balanceQty(it.id);
+          el.textContent = (Number(it.openingQty) || 0) + bal;
+        } catch { el.textContent = "—"; }
+      }
+    })();
   }
 
   // ---------- draw ----------
@@ -766,4 +894,5 @@ window.renderQuotes = () => renderSales("QUOTE", { history: false });
 window.renderQuotesHistory = () => renderSales("QUOTE", { history: true });
 window.renderOrders = () => renderSales("ORDER", { history: false });
 window.renderOrdersHistory = () => renderSales("ORDER", { history: true });
-window.renderInvoices = () => renderSales("INVOICE", { history: false });
+window.renderInvoices = () => renderSales("INVOICE", { credited: false });
+window.renderInvoicesCredited = () => renderSales("INVOICE", { credited: true });
