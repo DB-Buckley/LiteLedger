@@ -37,6 +37,63 @@
     return rows;
   }
 
+  // Drop-in: robust processor for Supplier Invoice (PINV) -> writes movements + updates costAvg
+window.processSupplierInvoice = async function processSupplierInvoice(docId) {
+  const doc = await get('docs', docId);
+  if (!doc || doc.type !== 'PINV') { toast('Not a supplier invoice', 'warn'); return; }
+  if (doc.status === 'PROCESSED') { toast('Already processed', 'warn'); return; }
+
+  const lines = await whereIndex('lines', 'by_doc', doc.id);
+  const wh = doc.warehouseId || 'WH1';
+  let wroteAny = 0;
+
+  for (const ln of lines) {
+    // Skip invalid lines
+    const qty = Math.max(0, Number(ln.qty) || 0);
+    if (!ln.itemId || qty <= 0) continue;
+
+    const item = await get('items', ln.itemId);
+    if (!item || item.nonStock) continue;
+
+    // Choose the best "unit cost ex VAT" we have
+    const unitCostEx = Number(ln.unitCost ?? ln.unitPrice ?? item.costAvg ?? 0) || 0;
+    const discountPct = Number(ln.discountPct) || 0;
+    const netUnit = round2(unitCostEx * (discountPct ? (1 - discountPct / 100) : 1));
+    const exLine = round2(netUnit * qty);
+
+    // Weighted-average cost update
+    const beforeQty = (Number(item.openingQty) || 0) + (await balanceQty(item.id));
+    const newOnHand = beforeQty + qty;
+    if (newOnHand > 0) {
+      const valueAfter = (Number(item.costAvg) || 0) * Math.max(0, beforeQty) + exLine;
+      item.costAvg = round2(valueAfter / newOnHand);
+      await put('items', item);
+    }
+
+    // Write movement (positive qty adds stock)
+    await add('movements', {
+      id: randId(),
+      itemId: item.id,
+      warehouseId: wh,
+      type: 'PURCHASE',
+      qtyDelta: qty,
+      costImpact: exLine,
+      relatedDocId: doc.id,
+      timestamp: nowISO(),
+      note: `PINV ${doc.no || ''}`,
+    });
+
+    wroteAny++;
+  }
+
+  doc.status = 'PROCESSED';
+  doc.processedAt = nowISO();
+  await put('docs', doc);
+
+  console.debug('[PINV process] doc:', { id: doc.id, no: doc.no, wroteAny });
+  toast(wroteAny ? 'Supplier invoice processed' : 'Nothing to process', wroteAny ? 'success' : 'warn');
+};
+
   async function applyStockOnPurchase(doc, lines) {
     for (const ln of (lines || [])) {
       const item = await get("items", ln.itemId);
