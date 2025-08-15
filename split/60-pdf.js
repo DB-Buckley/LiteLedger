@@ -1,7 +1,8 @@
 // ============================================================================
 // 60-pdf.js — Minimal PDF/Print for Quotes / Orders / Invoices (resilient)
 // Opens a print-ready window (users can "Save as PDF").
-// Exposes: downloadInvoicePDF(id?, ctx?), exportInvoicePDF, generateInvoicePDF
+// Exposes: downloadInvoicePDF(id?, ctx?), exportInvoicePDF, generateInvoicePDF,
+//          getInvoiceHTML (returns {title, html})
 // ctx = { doc, lines } optional; if missing we load from IndexedDB.
 // Depends on: get, all, whereIndex; optional: currency, calcLineTotals, sumDoc
 // ============================================================================
@@ -200,47 +201,46 @@
     return { title, html };
   }
 
- // --- Public API -----------------------------------------------------------
+  // --- Public API -----------------------------------------------------------
 
-  
-async function getInvoiceHTML(docId, ctx) {
-  const data = await loadContext(docId, ctx);
-  return buildHTML(data); // -> { title, html }
-}
-window.getInvoiceHTML = getInvoiceHTML;
-
-// Write into a window you already opened (prevents popup blockers)
-async function downloadInvoicePDFInto(targetWindow, docId, ctx) {
-  const w = targetWindow;
-  if (!w) throw new Error("No target window");
-  try {
+  async function getInvoiceHTML(docId, ctx) {
     const data = await loadContext(docId, ctx);
-    const { title, html } = buildHTML(data);
-    writeHTML(w, html, title);
-  } catch (err) {
-    console.error("[PDF]", err);
-    writeError(w, err?.message || String(err));
+    return buildHTML(data); // -> { title, html }
   }
-}
+  window.getInvoiceHTML = getInvoiceHTML;
 
-// Classic API (will open its own window)
-async function downloadInvoicePDF(docId, ctx) {
-  const w = openShellWindow("Generating…");
-  try {
-    const data = await loadContext(docId, ctx);
-    const { title, html } = buildHTML(data);
-    writeHTML(w, html, title);
-  } catch (err) {
-    console.error("[PDF]", err);
-    writeError(w, err?.message || String(err));
+  // Write into a window you already opened (prevents popup blockers)
+  async function downloadInvoicePDFInto(targetWindow, docId, ctx) {
+    const w = targetWindow;
+    if (!w) throw new Error("No target window");
+    try {
+      const data = await loadContext(docId, ctx);
+      const { title, html } = buildHTML(data);
+      writeHTML(w, html, title);
+    } catch (err) {
+      console.error("[PDF]", err);
+      writeError(w, err?.message || String(err));
+    }
   }
-}
-async function exportInvoicePDF(docId, ctx)  { return downloadInvoicePDF(docId, ctx); }
-async function generateInvoicePDF(docId, ctx){ return downloadInvoicePDF(docId, ctx); }
 
-window.downloadInvoicePDFInto = downloadInvoicePDFInto;
-window.downloadInvoicePDF     = downloadInvoicePDF;
-window.exportInvoicePDF       = exportInvoicePDF;
-window.generateInvoicePDF     = generateInvoicePDF;
+  // Classic API (opens its own window)
+  async function downloadInvoicePDF(docId, ctx) {
+    const w = openShellWindow("Generating…");
+    try {
+      const data = await loadContext(docId, ctx);
+      const { title, html } = buildHTML(data);
+      writeHTML(w, html, title);
+    } catch (err) {
+      console.error("[PDF]", err);
+      writeError(w, err?.message || String(err));
+    }
+  }
+  async function exportInvoicePDF(docId, ctx)  { return downloadInvoicePDF(docId, ctx); }
+  async function generateInvoicePDF(docId, ctx){ return downloadInvoicePDF(docId, ctx); }
+
+  window.downloadInvoicePDFInto = downloadInvoicePDFInto;
+  window.downloadInvoicePDF     = downloadInvoicePDF;
+  window.exportInvoicePDF       = exportInvoicePDF;
+  window.generateInvoicePDF     = generateInvoicePDF;
 
 })();
