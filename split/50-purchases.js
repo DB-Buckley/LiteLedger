@@ -393,21 +393,30 @@
     }
 
     // Lightweight overlay picker that sits above the modal
+// --- Drop-in replacement: Midnight-themed item picker overlay
+//     mounted INSIDE #modal to avoid closing the parent dialog.
 async function openItemPickerOverlay({ preset = "", onPick }) {
   const items = await all("items");
 
-  // Fullscreen overlay
+  // Mount inside the <dialog id="modal"> if present; else fallback to body.
+  const modal = document.getElementById("modal");
+  const host = modal || document.body;
+
+  // Fullscreen overlay (fixed works fine even inside dialog)
   const wrap = document.createElement("div");
   wrap.id = "pi_picker_overlay";
   wrap.tabIndex = -1;
   wrap.style.cssText = `
-    position:fixed; inset:0; z-index:100000;
-    background:rgba(2,6,23,.85); /* midnight-ish backdrop */
+    position:fixed; inset:0; z-index:100000; 
+    background:rgba(2,6,23,.85);
     display:flex; align-items:center; justify-content:center;
   `;
 
-  // Prevent key events (e.g., Esc) from closing the underlying <dialog id="modal">
-  wrap.addEventListener("keydown", (e) => e.stopPropagation(), { capture: true });
+  // Stop any events from bubbling to global handlers that might close the dialog
+  const stopAll = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ["click","mousedown","mouseup","keydown","keyup"].forEach(evt =>
+    wrap.addEventListener(evt, stopAll, true) // capture phase
+  );
 
   // Container card
   const card = document.createElement("div");
@@ -439,11 +448,17 @@ async function openItemPickerOverlay({ preset = "", onPick }) {
       </div>
     </div>
   `;
+
   wrap.appendChild(card);
-  document.body.appendChild(wrap);
+  host.appendChild(wrap); // <-- mount inside the dialog
 
   const closeOverlay = () => wrap.remove();
-  $("#pi_picker_close").onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeOverlay(); };
+
+  // Ensure close button doesn’t bubble
+  document.getElementById("pi_picker_close").onclick = (e) => {
+    e.preventDefault(); e.stopPropagation();
+    closeOverlay();
+  };
 
   // Render rows helper
   function rowsHtml(list) {
@@ -458,27 +473,31 @@ async function openItemPickerOverlay({ preset = "", onPick }) {
     `).join("");
   }
 
-  // Wire up an item list with search
   async function wireList(list) {
-    $("#pi_picker_rows").innerHTML = rowsHtml(list);
-    // Bind "Add" buttons — prevent bubbling so the parent <dialog> doesn't close
-    $$("#pi_picker_rows [data-pick]").forEach((btn) => {
-      btn.onclick = (e) => {
+    const tbody = document.getElementById("pi_picker_rows");
+    if (!tbody) return;
+    tbody.innerHTML = rowsHtml(list);
+
+    // Bind "Add" buttons — triple-stop events so parent dialog stays open
+    tbody.querySelectorAll("[data-pick]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
         const it = list.find((x) => x.id === btn.dataset.pick);
         if (it) {
-          onPick?.(it);
-          closeOverlay(); // only close the overlay
+          onPick?.(it);    // add to the invoice
+          closeOverlay();  // close only the overlay
         }
-      };
+      }, { capture: true });
     });
   }
 
-  // Initial list + search wire
+  // Initial list + search
   const baseList = items.slice();
-  $("#pi_picker_q").oninput = () => {
-    const q = ($("#pi_picker_q").value || "").toLowerCase();
+  const search = document.getElementById("pi_picker_q");
+  const doSearch = () => {
+    const q = (search.value || "").toLowerCase();
     const filtered = baseList.filter((i) =>
       (i.sku || "").toLowerCase().includes(q) ||
       (i.name || "").toLowerCase().includes(q) ||
@@ -486,19 +505,20 @@ async function openItemPickerOverlay({ preset = "", onPick }) {
     );
     wireList(filtered);
   };
-  $("#pi_picker_q").dispatchEvent(new Event("input"));
+  search.oninput = doSearch;
+  doSearch();
 
   // Fill on-hand asynchronously
   (async () => {
     for (const it of baseList) {
-      const ohEl = document.querySelector(`[data-oh="oh-${it.id}"]`);
-      if (!ohEl) continue;
+      const el = wrap.querySelector(`[data-oh="oh-${it.id}"]`);
+      if (!el) continue;
       const bal = await balanceQty(it.id);
-      const onHand = (Number(it.openingQty) || 0) + bal;
-      ohEl.textContent = onHand;
+      el.textContent = (Number(it.openingQty) || 0) + bal;
     }
   })();
 }
+
 
     draw();
   }
