@@ -4,7 +4,7 @@
 
 const DB_NAME = "liteledger_mvp";
 // Bump this whenever you add/change stores or indexes:
-const DB_VER = 7;
+const DB_VER = 8;
 
 let _dbp; // cached connection (any version >= DB_VER)
 
@@ -30,16 +30,22 @@ function openDBAt(version) {
       ensureIndex(getStore("users",      { keyPath: "id" }), "by_id", "id", { unique: true });
       ensureIndex(getStore("warehouses", { keyPath: "id" }), "by_id", "id", { unique: true });
 
-      // --- Settings ---
-      getStore("settings", { keyPath: "key" });
+      // --- Settings (keyed by "key") ---
+      getStore("settings", { keyPath: "key" }); // typically { key: "app", value: {...} }
 
       // --- Master data ---
-      { const s = getStore("customers", { keyPath: "id" }); ensureIndex(s, "by_code", "code", { unique: true }); }
-      { const s = getStore("suppliers", { keyPath: "id" }); ensureIndex(s, "by_code", "code", { unique: true }); }
+      {
+        const s = getStore("customers", { keyPath: "id" });
+        ensureIndex(s, "by_code", "code", { unique: true });
+      }
+      {
+        const s = getStore("suppliers", { keyPath: "id" });
+        ensureIndex(s, "by_code", "code", { unique: true });
+      }
       {
         const s = getStore("items", { keyPath: "id" });
         ensureIndex(s, "by_sku", "sku", { unique: true });
-        ensureIndex(s, "by_barcode", "barcode");
+        ensureIndex(s, "by_barcode", "barcode", { unique: false });
       }
 
       // --- Documents + lines ---
@@ -50,16 +56,19 @@ function openDBAt(version) {
         ensureIndex(s, "by_customer", "customerId");
         ensureIndex(s, "by_supplier", "supplierId");
       }
-      { const s = getStore("lines", { keyPath: "id" }); ensureIndex(s, "by_doc", "docId"); }
+      {
+        const s = getStore("lines", { keyPath: "id" });
+        ensureIndex(s, "by_doc", "docId");
+      }
 
-      // --- Inventory movements ---
+      // --- Inventory movements (source of truth for on-hand) ---
       {
         const s = getStore("movements", { keyPath: "id" });
         ensureIndex(s, "by_item", "itemId");
         ensureIndex(s, "by_doc", "relatedDocId");
       }
 
-      // --- Customer payments (receipts) ---
+      // --- Customer payments (receipts/allocations to AR) ---
       {
         const s = getStore("payments", { keyPath: "id" });
         ensureIndex(s, "by_customer", "customerId");
@@ -76,7 +85,8 @@ function openDBAt(version) {
       // --- PDF Layouts ---
       getStore("docLayouts", { keyPath: "id" });
 
-      // --- Adjustments ---
+      // --- Adjustments (manual stock corrections / audits) ---
+      // { id, itemId, warehouseId, qtyDelta, reason, note, userId, relatedDocId, timestamp }
       {
         const s = getStore("adjustments", { keyPath: "id" });
         ensureIndex(s, "by_item", "itemId");
@@ -86,7 +96,7 @@ function openDBAt(version) {
         ensureIndex(s, "by_user", "userId");
       }
 
-      // --- Misc ---
+      // --- Misc scratch stores used by UI (drag positions, etc.) ---
       getStore("dragging", { keyPath: "id" });
       getStore("primary",  { keyPath: "id" });
     };
@@ -109,31 +119,33 @@ function openDB() {
   return _dbp;
 }
 
+// Self-healing transaction: re-open DB if a requested store is missing.
 async function tx(stores, mode = "readonly") {
   const wanted = Array.isArray(stores) ? stores : [stores];
   let db = await openDB();
 
-  const storesMissing = wanted.filter((s) => !db.objectStoreNames.contains(s));
-  if (storesMissing.length) {
-    console.warn(`[DB] Missing stores ${storesMissing.join(", ")}. Reopening to apply upgrade…`);
+  // Re-open at DB_VER if any store missing (stale connection in memory).
+  let missing = wanted.filter((s) => !db.objectStoreNames.contains(s));
+  if (missing.length) {
+    console.warn(`[DB] Missing stores ${missing.join(", ")}. Reopening to apply upgrade…`);
     try { db.close?.(); } catch {}
     _dbp = null;
-    db = await openDB(); // open at DB_VER (should run onupgradeneeded if old)
+    db = await openDB();
   }
 
-  // If still missing, force a rescue upgrade at (DB_VER + 1)
-  const stillMissing = wanted.filter((s) => !db.objectStoreNames.contains(s));
-  if (stillMissing.length) {
-    console.warn(`[DB] Stores still missing after reopen: ${stillMissing.join(", ")}. Forcing rescue upgrade…`);
+  // If still missing, force a rescue upgrade at (DB_VER + 1).
+  missing = wanted.filter((s) => !db.objectStoreNames.contains(s));
+  if (missing.length) {
+    console.warn(`[DB] Still missing after reopen: ${missing.join(", ")}. Forcing rescue upgrade…`);
     try { db.close?.(); } catch {}
     _dbp = openDBAt(DB_VER + 1).then((db2) => {
-      db2.onversionchange = () => { try { db2.close(); } catch {}; };
+      db2.onversionchange = () => { try { db2.close(); } catch {} };
       return db2;
     });
     db = await _dbp;
   }
 
-  // Final check
+  // Final guard
   const finalMissing = wanted.filter((s) => !db.objectStoreNames.contains(s));
   if (finalMissing.length) {
     throw new Error(`Object store(s) not found: ${finalMissing.join(", ")}`);
@@ -142,7 +154,6 @@ async function tx(stores, mode = "readonly") {
   try {
     return db.transaction(wanted, mode);
   } catch (err) {
-    // Retry once after a fresh reopen
     if (err && String(err.name || err).includes("NotFoundError")) {
       console.warn("[DB] Transaction NotFoundError; reopening and retrying once…");
       try { db.close?.(); } catch {}
@@ -210,7 +221,7 @@ async function whereIndex(store, indexName, key) {
   });
 }
 
-// (optional) range query helper
+// Range query helper
 async function whereRange(store, indexName, IDBKeyRangeInstance) {
   const t = await tx([store], "readonly");
   return await new Promise((res, rej) => {
@@ -220,7 +231,7 @@ async function whereRange(store, indexName, IDBKeyRangeInstance) {
   });
 }
 
-// (optional) clear store
+// Clear store helper
 async function clearStore(store) {
   const t = await tx([store], "readwrite");
   return await new Promise((res, rej) => {
