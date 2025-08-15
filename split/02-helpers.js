@@ -91,10 +91,24 @@
   }
 
   // --------------------------- Inventory helpers ----------------------------
+  // Robust balance calculator: sums all qtyDelta for an item (optionally by warehouse).
+  // Falls back to full scan if the "by_item" index isn't available.
   if (typeof window.balanceQty !== "function") {
-    window.balanceQty = async (itemId) => {
-      const movs = await whereIndex("movements", "by_item", itemId);
-      return movs.reduce((s, m) => s + (Number(m.qtyDelta) || 0), 0);
+    window.balanceQty = async (itemId, opts = {}) => {
+      const { warehouseId = null } = opts || {};
+      let movs = [];
+      try {
+        movs = await whereIndex("movements", "by_item", itemId);
+      } catch {
+        movs = await all("movements");
+        movs = (movs || []).filter(m => m.itemId === itemId);
+      }
+      let sum = 0;
+      for (const m of (movs || [])) {
+        if (warehouseId && m.warehouseId !== warehouseId) continue;
+        sum += Number(m.qtyDelta) || 0; // type-agnostic: PURCHASE+, SALE-, ADJUST±, etc.
+      }
+      return sum;
     };
   }
 
@@ -122,7 +136,8 @@
     })();
   }
 
-  // ------------------------------- Item picker ------------------------------
+  // ------------------------------- Item finder ------------------------------
+  // Legacy finder used by older flows. New flows embed their own picker in the modal.
   if (typeof window.openItemFinder !== "function") {
     window.openItemFinder = async ({ onPick }) => {
       const items = await all("items");
@@ -142,7 +157,7 @@
               <tbody id="it_rows">
                 ${items.map(i => `
                   <tr data-id="${i.id}">
-                    <td>${i.sku || ""}</td>
+                    <td>${i.sku || i.code || ""}</td>
                     <td>${i.name || ""}</td>
                     <td>${currency(i.sellPrice || i.costAvg || 0)}</td>
                     <td><button class="btn" data-pick="${i.id}">Choose</button></td>
@@ -206,6 +221,7 @@
   }
 
   // ----------------------------- PDF generator ------------------------------
+  // Fallback PDF builder if your HTML->PDF module (60-pdf.js) isn't loaded.
   if (typeof window.buildInvoicePDF_lib !== "function") {
     window.buildInvoicePDF_lib = async function buildInvoicePDF_lib({ doc, lines = [], company, customer, settings }) {
       const { PDFDocument, StandardFonts, rgb } = (window.PDFLib || {});
