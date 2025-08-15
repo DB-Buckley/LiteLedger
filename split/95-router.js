@@ -1,9 +1,11 @@
 // ============================================================================
 // Router (hash-based)
 // Depends on: page renderers exposed on window, e.g. window.renderDashboard()
+// Supports lazy-loading split bundles when a route fn isn't present yet.
 // ============================================================================
 
 (function () {
+  // Route map: path -> window function name
   const ROUTES = {
     "/": "renderDashboard",
     "/dashboard": "renderDashboard",
@@ -11,12 +13,14 @@
     "/customers": "renderCustomers",
     "/customers-archived": "renderCustomersArchived",
 
-
     "/suppliers": "renderSuppliers",
     "/suppliers-archived": "renderSuppliersArchived",
-    
+
     "/items": "renderItems",
+
+    // Purchases
     "/purchases": "renderPurchases",
+    "/purchases-processed": "renderPurchasesProcessed",      // optional, for processed PINVs
     "/supplier-payments": "renderSupplierPayments",
 
     // Sales
@@ -32,20 +36,79 @@
     "/about": "renderAbout",
   };
 
+  // Which chunk(s) to load for a given path group (tries in order)
+  const LAZY = [
+    { test: /^\/(quotes|quotes-history|orders|orders-history|invoices)(\/|$)?/i,
+      files: ["/split/50-sales-documents-quotes-orders-invoices.js", "/50-sales-documents-quotes-orders-invoices.js"] },
+    { test: /^\/(purchases|purchases-processed|supplier-payments)(\/|$)?/i,
+      files: ["/split/50-purchases.js", "/50-purchases.js"] },
+    { test: /^\/(customers|customers-archived)(\/|$)?/i,
+      files: ["/20-customers.js"] },
+    { test: /^\/(suppliers|suppliers-archived)(\/|$)?/i,
+      files: ["/20-suppliers.js"] },
+    { test: /^\/items(\/|$)?/i,
+      files: ["/30-items.js"] },
+    { test: /^\/layouts(\/|$)?/i,
+      files: ["/40-layouts.js"] },
+    { test: /^\/payments(\/|$)?/i,
+      files: ["/70-payments.js"] },
+    { test: /^\/settings(\/|$)?/i,
+      files: ["/80-settings.js"] },
+    { test: /^\/about(\/|$)?/i,
+      files: ["/90-about.js"] },
+    { test: /^\/(dashboard|)$/i,
+      files: ["/10-dashboard.js"] },
+  ];
+
   function getPath() {
     const h = (location.hash || "").replace(/^#/, "");
     return h ? (h.startsWith("/") ? h : `/${h}`) : "/dashboard";
   }
 
+  function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+      // Already present?
+      const already = Array.from(document.scripts).some(s => s.src && s.src.endsWith(src));
+      if (already) return resolve(true);
+      const s = document.createElement("script");
+      s.src = src;
+      s.async = false; // preserve execution order
+      s.onload = () => resolve(true);
+      s.onerror = () => reject(new Error(`Failed to load ${src}`));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureChunkFor(path) {
+    const group = LAZY.find(g => g.test.test(path));
+    if (!group) return false;
+    for (const f of group.files) {
+      try {
+        await loadScriptOnce(f);
+        return true;
+      } catch (_) {
+        // try next candidate
+      }
+    }
+    return false;
+  }
+
   async function renderRouteFromHash() {
     const path = getPath();
     const fnName = ROUTES[path] || "renderDashboard";
+
     try {
-      const fn = window[fnName];
+      let fn = window[fnName];
+      if (typeof fn !== "function") {
+        // Try to lazy-load a chunk for this path, then re-check
+        await ensureChunkFor(path);
+        fn = window[fnName];
+      }
+
       if (typeof fn === "function") {
         await fn();
       } else {
-        console.warn(`Route "${path}" -> ${fnName} not loaded yet; falling back to dashboard.`);
+        console.warn(`Route "${path}" -> ${fnName} not available; falling back to dashboard.`);
         await window.renderDashboard?.();
       }
     } catch (e) {
@@ -61,6 +124,7 @@
           </div>`;
       }
     }
+
     setActiveNav(path);
   }
 
