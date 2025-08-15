@@ -2,7 +2,7 @@
 // Purchases (Supplier Invoices) + Supplier Payments / Allocations
 // Depends on: 01-db.js, 02-helpers.js ($, $$, all, get, put, add, del, whereIndex,
 //           nowISO, randId, round2, currency, toast, goto, balanceQty, sumDoc, calcLineTotals),
-//           20-suppliers.js (for window.getActiveSuppliers if available),
+//           20-suppliers.js (optional window.getActiveSuppliers),
 //           60-pdf.js (for getInvoiceHTML - same overlay UX as sales docs)
 // Notes:
 // - No top-level await
@@ -32,7 +32,7 @@
         ? round2(((oldAvg * beforeQty) + (netUnit * qty)) / denominator)
         : netUnit;
 
-      rows.push({ item, qty, beforeQty, afterQty: beforeQty + qty, oldAvg, netUnit, newAvg });
+      rows.push({ item, qty, netUnit, beforeQty, afterQty: beforeQty + qty, oldAvg, newAvg });
     }
     return rows;
   }
@@ -44,150 +44,151 @@
 
       const wh = doc.warehouseId || "WH1";
       const qty = Math.max(0, Number(ln.qty) || 0);
+      if (qty <= 0) continue;
+
       const unitCostEx = Number(ln.unitCost) || 0;
       const discountPct = Number(ln.discountPct) || 0;
       const netUnit = round2(unitCostEx * (discountPct ? (1 - discountPct / 100) : 1));
+      const exLine = round2(netUnit * qty);
 
+      // Weighted average using opening + movements (pre-receipt)
       const beforeQty = (Number(item.openingQty) || 0) + (await balanceQty(item.id));
       const oldAvg = Number(item.costAvg) || 0;
-      const denominator = beforeQty + qty;
-      const newAvg = denominator > 0
-        ? round2(((oldAvg * beforeQty) + (netUnit * qty)) / denominator)
-        : netUnit;
+      const newOnHand = beforeQty + qty;
 
-      item.costAvg = newAvg;
-      await put("items", item);
+      if (newOnHand > 0) {
+        const valueAfter = (oldAvg * Math.max(0, beforeQty)) + exLine;
+        item.costAvg = round2(valueAfter / newOnHand);
+        await put("items", item);
+      }
 
       await add("movements", {
-      id: randId(),
-      itemId: item.id,
-      warehouseId: wh,
-      type: "PURCHASE",              // label is arbitrary now that balanceQty is type-agnostic
-      qtyDelta: qty,                 // positive adds stock
-      costImpact: round2(netUnit * qty),
-      relatedDocId: doc.id,
-      timestamp: nowISO(),
-      note: `PINV ${doc.no}`,
-    });
+        id: randId(),
+        itemId: item.id,
+        warehouseId: wh,
+        type: "PURCHASE",
+        qtyDelta: qty,                // positive adds stock
+        costImpact: exLine,           // ex-VAT total
+        relatedDocId: doc.id,
+        timestamp: nowISO(),
+        note: `PINV ${doc.no || ""}`,
+      });
     }
   }
 
-  // --------------------------- ITEM PICKER (INSIDE MODAL) ---------------------
-let _pickerPanel = null;
+  // --------------------------- ITEM PICKER (INSIDE MODAL) -------------------
+  let _pickerPanel = null;
 
-function ensureItemPicker(hostEl = document.getElementById("modal")) {
-  if (_pickerPanel && hostEl.contains(_pickerPanel)) return _pickerPanel;
+  function ensureItemPicker(hostEl = document.getElementById("modal")) {
+    if (_pickerPanel && hostEl.contains(_pickerPanel)) return _pickerPanel;
 
-  // make host a positioning context so the panel can cover it
-  const hostStyle = getComputedStyle(hostEl);
-  if (hostStyle.position === "static") hostEl.style.position = "relative";
+    const hostStyle = getComputedStyle(hostEl);
+    if (hostStyle.position === "static") hostEl.style.position = "relative";
 
-  const panel = document.createElement("div");
-  panel.id = "item_picker_panel";
-  panel.style.cssText = `
-    position:absolute; inset:0; z-index:9999; display:none;
-    background:rgba(0,0,0,.45); align-items:center; justify-content:center;
-  `;
-  panel.innerHTML = `
-    <div class="card" style="width:min(880px,94vw); max-height:80vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.35)">
-      <div class="hd" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-        <b>Find Item</b>
-        <div class="row" style="gap:8px">
-          <input id="ip_query" placeholder="Search by code / SKU / name / barcode" style="min-width:320px">
-          <button type="button" class="btn" id="ip_close">Close</button>
+    const panel = document.createElement("div");
+    panel.id = "item_picker_panel";
+    panel.style.cssText = `
+      position:absolute; inset:0; z-index:9999; display:none;
+      background:rgba(0,0,0,.45); align-items:center; justify-content:center;
+    `;
+    panel.innerHTML = `
+      <div class="card" style="width:min(880px,94vw); max-height:80vh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.35)">
+        <div class="hd" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <b>Find Item</b>
+          <div class="row" style="gap:8px">
+            <input id="ip_query" placeholder="Search by code / SKU / name / barcode" style="min-width:320px">
+            <button type="button" class="btn" id="ip_close">Close</button>
+          </div>
+        </div>
+        <div class="bd">
+          <div style="max-height:52vh; overflow:auto">
+            <table class="table small">
+              <thead>
+                <tr><th>Code</th><th>Name</th><th class="r">Avg Cost</th><th class="r">On Hand</th><th class="r" style="width:120px">Qty</th><th class="r" style="width:90px"></th></tr>
+              </thead>
+              <tbody id="ip_rows"><tr><td colspan="6">Type to search…</td></tr></tbody>
+            </table>
+          </div>
         </div>
       </div>
-      <div class="bd">
-        <div style="max-height:52vh; overflow:auto">
-          <table class="table small">
-            <thead>
-              <tr><th>Code</th><th>Name</th><th class="r">Avg Cost</th><th class="r">On Hand</th><th class="r" style="width:120px">Qty</th><th class="r" style="width:90px"></th></tr>
-            </thead>
-            <tbody id="ip_rows"><tr><td colspan="6">Type to search…</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  `;
+    `;
+    panel.addEventListener("click", (e) => { if (e.target === panel) panel.style.display = "none"; });
+    panel.querySelector("#ip_close").onclick = () => { panel.style.display = "none"; };
 
-  panel.addEventListener("click", (e) => { if (e.target === panel) panel.style.display = "none"; });
-  panel.querySelector("#ip_close").onclick = () => { panel.style.display = "none"; };
-
-  hostEl.appendChild(panel);
-  _pickerPanel = panel;
-  return _pickerPanel;
-}
-
-async function openItemPicker({ onPick, prefill = "", host } = {}) {
-  const modalHost = host || document.getElementById("modal");
-  const el = ensureItemPicker(modalHost);
-  const q = el.querySelector("#ip_query");
-  const rows = el.querySelector("#ip_rows");
-  const items = (await all("items")).filter(i => !i.nonStock);
-
-  async function render(needle = "") {
-    const n = needle.toLowerCase().trim();
-    const subset = !n
-      ? items.slice(0, 50)
-      : items.filter(i =>
-          (i.sku || "").toLowerCase().includes(n) ||
-          (i.barcode || "").toLowerCase().includes(n) ||
-          (i.code || "").toLowerCase().includes(n) ||
-          (i.name || "").toLowerCase().includes(n) ||
-          (i.id || "").toString().toLowerCase().includes(n)
-        ).slice(0, 50);
-
-    if (!subset.length) {
-      rows.innerHTML = `<tr><td colspan="6" class="muted">No matches</td></tr>`;
-      return;
-    }
-
-    const qtyByItem = new Map();
-    for (const it of subset) {
-      // eslint-disable-next-line no-await-in-loop
-      const bal = await balanceQty(it.id);
-      const onHand = (Number(it.openingQty) || 0) + bal;
-      qtyByItem.set(it.id, onHand);
-    }
-
-    rows.innerHTML = subset.map(it => `
-      <tr data-id="${it.id}">
-        <td>${it.code || it.sku || it.barcode || it.id || ""}</td>
-        <td>${it.name || ""}</td>
-        <td class="r">${currency(Number(it.costAvg) || 0)}</td>
-        <td class="r">${qtyByItem.get(it.id) ?? 0}</td>
-        <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
-        <td class="r"><button type="button" class="btn" data-add>Add</button></td>
-      </tr>
-    `).join("");
-
-    rows.querySelectorAll("tr[data-id]").forEach(tr => {
-      const id = tr.dataset.id;
-      const it = subset.find(x => x.id === id);
-      const qtyEl = tr.querySelector("[data-qty]");
-
-      const pick = (ev) => {
-        ev?.preventDefault?.();
-        ev?.stopPropagation?.();
-        const qty = Math.max(1, Number(qtyEl.value) || 1);
-        onPick?.(it, qty);
-        el.style.display = "none"; // only hide picker, keep the main modal open
-      };
-
-      tr.querySelector("[data-add]").onclick = pick;
-      tr.ondblclick = pick;
-    });
+    hostEl.appendChild(panel);
+    _pickerPanel = panel;
+    return _pickerPanel;
   }
 
-  el.style.display = "flex";
-  rows.innerHTML = `<tr><td colspan="6">Type to search…</td></tr>`;
-  q.value = prefill;
-  q.oninput = () => render(q.value);
-  q.onkeydown = (e) => { if (e.key === "Enter") render(q.value); };
-  q.focus();
-  render(prefill);
-}
+  async function openItemPicker({ onPick, prefill = "", host } = {}) {
+    const modalHost = host || document.getElementById("modal");
+    const el = ensureItemPicker(modalHost);
+    const q = el.querySelector("#ip_query");
+    const rows = el.querySelector("#ip_rows");
+    const items = (await all("items")).filter(i => !i.nonStock);
 
+    async function render(needle = "") {
+      const n = needle.toLowerCase().trim();
+      const subset = !n
+        ? items.slice(0, 50)
+        : items.filter(i =>
+            (i.sku || "").toLowerCase().includes(n) ||
+            (i.barcode || "").toLowerCase().includes(n) ||
+            (i.code || "").toLowerCase().includes(n) ||
+            (i.name || "").toLowerCase().includes(n) ||
+            (i.id || "").toString().toLowerCase().includes(n)
+          ).slice(0, 50);
+
+      if (!subset.length) {
+        rows.innerHTML = `<tr><td colspan="6" class="muted">No matches</td></tr>`;
+        return;
+      }
+
+      const qtyByItem = new Map();
+      for (const it of subset) {
+        // eslint-disable-next-line no-await-in-loop
+        const bal = await balanceQty(it.id);
+        const onHand = (Number(it.openingQty) || 0) + bal;
+        qtyByItem.set(it.id, onHand);
+      }
+
+      rows.innerHTML = subset.map(it => `
+        <tr data-id="${it.id}">
+          <td>${it.code || it.sku || it.barcode || it.id || ""}</td>
+          <td>${it.name || ""}</td>
+          <td class="r">${currency(Number(it.costAvg) || 0)}</td>
+          <td class="r">${qtyByItem.get(it.id) ?? 0}</td>
+          <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
+          <td class="r"><button type="button" class="btn" data-add>Add</button></td>
+        </tr>
+      `).join("");
+
+      rows.querySelectorAll("tr[data-id]").forEach(tr => {
+        const id = tr.dataset.id;
+        const it = subset.find(x => x.id === id);
+        const qtyEl = tr.querySelector("[data-qty]");
+
+        const pick = (ev) => {
+          ev?.preventDefault?.();
+          ev?.stopPropagation?.();
+          const qty = Math.max(1, Number(qtyEl.value) || 1);
+          onPick?.(it, qty);
+          el.style.display = "none"; // hide picker but keep main modal open
+        };
+
+        tr.querySelector("[data-add]").onclick = pick;
+        tr.ondblclick = pick;
+      });
+    }
+
+    el.style.display = "flex";
+    rows.innerHTML = `<tr><td colspan="6">Type to search…</td></tr>`;
+    q.value = prefill;
+    q.oninput = () => render(q.value);
+    q.onkeydown = (e) => { if (e.key === "Enter") render(q.value); };
+    q.focus();
+    render(prefill);
+  }
 
   // ----------------------------- PDF helpers --------------------------------
   async function ensurePdfModule() {
@@ -261,11 +262,8 @@ async function openItemPicker({ onPick, prefill = "", host } = {}) {
       .filter(d => d.type === "PINV")
       .sort((a, b) => (b.dates?.issue || "").localeCompare(a.dates?.issue || ""));
 
-    if (_showProcessed) {
-      pinvs = pinvs.filter(d => d.status === "PROCESSED");
-    } else {
-      pinvs = pinvs.filter(d => d.status !== "PROCESSED");
-    }
+    pinvs = _showProcessed ? pinvs.filter(d => d.status === "PROCESSED")
+                           : pinvs.filter(d => d.status !== "PROCESSED");
 
     const supplierName = (id) => suppliers.find(s => s.id === id)?.name || "—";
 
@@ -504,36 +502,31 @@ async function openItemPicker({ onPick, prefill = "", host } = {}) {
         // Field wiring
         $("#pinv_sup").onchange = () => (doc.supplierId = $("#pinv_sup").value);
         $("#pinv_date").onchange = () => (doc.dates.issue = $("#pinv_date").value);
-        $("#pinv_wh").oninput = () => (doc.warehouseId = $("#pinv_wh").value);
+        $("#pinv_wh").oninput  = () => (doc.warehouseId = $("#pinv_wh").value);
         $("#pinv_notes").oninput = () => (doc.notes = $("#pinv_notes").value);
 
-        // Fast add by code/sku (inside openPurchaseForm)
-$("#pinv_code").onkeydown = async (e) => {
-  if (e.key !== "Enter") return;
-  const code = ($("#pinv_code").value || "").trim().toLowerCase();
-  if (!code) return;
-  const allItems = (await all("items")).filter(i => !i.nonStock);
-  const it = allItems.find(i =>
-    (i.sku || "").toLowerCase() === code ||
-    (i.barcode || "").toLowerCase() === code ||
-    (i.code || "").toLowerCase() === code ||
-    (i.id || "").toLowerCase() === code
-  );
-  if (!it) {
-    // ✅ host the picker on the purchase modal
-    openItemPicker({ onPick: addLineFromItem, prefill: code, host: m });
-    return;
-  }
-  addLineFromItem(it, 1);
-  $("#pinv_code").value = "";
-};
+        // Fast add by code/sku
+        $("#pinv_code").onkeydown = async (e) => {
+          if (e.key !== "Enter") return;
+          const code = ($("#pinv_code").value || "").trim().toLowerCase();
+          if (!code) return;
+          const allItems = (await all("items")).filter(i => !i.nonStock);
+          const it = allItems.find(i =>
+            (i.sku || "").toLowerCase() === code ||
+            (i.barcode || "").toLowerCase() === code ||
+            (i.code || "").toLowerCase() === code ||
+            (i.id || "").toLowerCase() === code
+          );
+          if (!it) {
+            openItemPicker({ onPick: addLineFromItem, prefill: code, host: m });
+            return;
+          }
+          addLineFromItem(it, 1);
+          $("#pinv_code").value = "";
+        };
 
-// "Add Item" button:
-$("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem, host: m });
-
-
-        // Open picker
-        $("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem });
+        // Add Item (single binding; hosted on modal)
+        $("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem, host: m });
 
         function addLineFromItem(it, qty = 1) {
           lines.push({
@@ -686,17 +679,17 @@ $("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem, host: m
     const v = $("#view");
     if (!v) return;
 
-    const [suppliersAll, docsAll, spays] = await Promise.all([
+    const [suppliersAll, docsAll, paysAll] = await Promise.all([
       all("suppliers"),
       all("docs"),
-      all("spayments"),
+      all("supplierPayments"), // <— store name matches DB
     ]);
 
     const suppliers = (suppliersAll || []).filter(s => !s.archived);
     const pinvs = (docsAll || []).filter(d => d.type === "PINV");
 
     const paidByInv = new Map();
-    for (const p of (spays || [])) {
+    for (const p of (paysAll || [])) {
       for (const a of (p.allocations || [])) {
         paidByInv.set(a.invoiceId, (paidByInv.get(a.invoiceId) || 0) + (Number(a.amount) || 0));
       }
@@ -756,7 +749,7 @@ $("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem, host: m
         </tr>
       `).join("");
 
-      const pays = (spays || []).filter(p => p.supplierId === supplierId)
+      const pays = (paysAll || []).filter(p => p.supplierId === supplierId)
         .sort((a,b) => (b.date || "").localeCompare(a.date || ""));
 
       const payRows = pays.map(p => `
@@ -800,9 +793,9 @@ $("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem, host: m
       const supplier = (suppliersLive || []).find(s => s.id === supplierId);
       const allInvs = (ctx?.pinvs || []).filter(d => d.supplierId === supplierId);
 
-      const spaysLive = await all("spayments");
+      const paysLive = await all("supplierPayments");
       const paidMap = new Map();
-      for (const p of (spaysLive || [])) for (const a of (p.allocations || [])) {
+      for (const p of (paysLive || [])) for (const a of (p.allocations || [])) {
         paidMap.set(a.invoiceId, (paidMap.get(a.invoiceId) || 0) + (Number(a.amount) || 0));
       }
 
@@ -890,7 +883,7 @@ $("#pinv_add").onclick = () => openItemPicker({ onPick: addLineFromItem, host: m
 
         pay.allocations = finalAllocs;
 
-        await add("spayments", pay);
+        await add("supplierPayments", pay); // <— store name matches DB
         toast("Supplier payment saved", "success");
         m.close();
         renderSupplierPayments();
