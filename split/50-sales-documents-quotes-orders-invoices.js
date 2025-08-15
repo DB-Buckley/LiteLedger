@@ -6,6 +6,284 @@
 // Depends on: 01-db.js, 02-helpers.js
 // Optional: adjustStockOnInvoice (called for INVOICE saves)
 // Works with: 60-pdf.js (window.getInvoiceHTML for overlay preview)
+//
+// Added:
+// - Credit Notes (SCN) for Invoices (no hard delete for customer invoices)
+// - "Credit" button on Invoice modal
+// - Delete is hidden/blocked for Invoices (use Credit instead)
+// ===========================================================================
+
+const __CREDIT_CFG = {
+  CUSTOMER_INVOICE_TYPES: new Set(["INVOICE"]), // if you also use "SINV", add it here
+  CREDIT_DOC_TYPE: "SCN",
+  MOVEMENT_TYPE: "SALE_RETURN",
+};
+
+// ---------- Lightweight PDF overlay (shared by Invoice + Credit Note) ----------
+(function () {
+  if (window.showPdfOverlay) return; // keep single global instance if reloaded
+
+  window.showPdfOverlay = function showPdfOverlay(html, title) {
+    const host = document.getElementById("modal") || document.body;
+    const overlay = document.createElement("div");
+    overlay.style.cssText = `
+      position: fixed; inset: 0; background: rgba(0,0,0,.45);
+      display:flex; align-items:center; justify-content:center; z-index:2147483647;`;
+    overlay.innerHTML = `
+      <div class="card" style="width:min(900px,96vw);height:min(90vh,900px);display:flex;flex-direction:column;overflow:hidden">
+        <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <b>${title || "Document"}</b>
+          <div class="row" style="gap:8px">
+            <button type="button" class="btn" id="pdf_print">Print</button>
+            <button type="button" class="btn" id="pdf_close">Close</button>
+          </div>
+        </div>
+        <div class="bd" style="flex:1;overflow:hidden">
+          <iframe id="pdf_iframe" style="width:100%;height:100%;border:0;background:#fff"></iframe>
+        </div>
+      </div>`;
+    host.appendChild(overlay);
+
+    const iframe = overlay.querySelector("#pdf_iframe");
+    const btnPrint = overlay.querySelector("#pdf_print");
+    const btnClose = overlay.querySelector("#pdf_close");
+
+    const idoc = iframe.contentDocument;
+    try { idoc.open(); idoc.write(html); idoc.close(); } catch (e) { console.error(e); }
+
+    btnPrint.onclick = () => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { console.error(e); } };
+    btnClose.onclick = () => overlay.remove();
+  };
+})();
+
+// ===========================================================================
+// Credits (SCN) — create from an Invoice
+// Public: window.openCreditNoteWizard(invoiceId)
+// ===========================================================================
+
+(async function attachCreditsAPI() {
+  if (window.openCreditNoteWizard) return;
+
+  function ensureAppModal() {
+    const m = document.getElementById("modal");
+    const body = document.getElementById("modalBody");
+    return (m && body) ? { m, body } : { m: null, body: null };
+  }
+
+  async function loadInvoice(invoiceId) {
+    const inv = await get("docs", invoiceId);
+    if (!inv) throw new Error("Invoice not found");
+    if (!__CREDIT_CFG.CUSTOMER_INVOICE_TYPES.has(inv.type)) throw new Error("Not a customer invoice");
+    const lines = await whereIndex("lines", "by_doc", inv.id);
+    return { inv, lines };
+  }
+
+  // Build item-level totals for invoiced & credited so we can compute per-line remaining safely
+  async function computeRemainingByLine(inv, lines) {
+    const invByItem = new Map();
+    for (const ln of lines) {
+      const k = ln.itemId;
+      invByItem.set(k, (invByItem.get(k) || 0) + Math.abs(Number(ln.qty) || 0));
+    }
+
+    // Sum credits already applied for this invoice (by relatedDocId), item-level
+    const docs = await all("docs");
+    const credits = (docs || []).filter(d => d.type === __CREDIT_CFG.CREDIT_DOC_TYPE && d.relatedDocId === inv.id);
+    const creditedByItem = new Map();
+    for (const scn of credits) {
+      const cls = await whereIndex("lines", "by_doc", scn.id);
+      for (const ln of cls) {
+        const k = ln.itemId;
+        const q = Math.abs(Number(ln.qty) || 0); // SCN lines will store negative qty, so abs here
+        creditedByItem.set(k, (creditedByItem.get(k) || 0) + q);
+      }
+    }
+
+    const remainingByItem = new Map();
+    for (const [k, totInv] of invByItem.entries()) {
+      const cred = creditedByItem.get(k) || 0;
+      remainingByItem.set(k, Math.max(0, round2(totInv - cred)));
+    }
+
+    // Distribute remaining per line, in order, so we don't exceed item totals if repeated lines exist
+    const remainingPerLine = new Map();
+    for (const ln of lines) {
+      const k = ln.itemId;
+      const leftForItem = remainingByItem.get(k) || 0;
+      const lineMax = Math.max(0, Math.min(Math.abs(Number(ln.qty) || 0), leftForItem));
+      remainingPerLine.set(ln.id, lineMax);
+      remainingByItem.set(k, Math.max(0, round2(leftForItem - lineMax)));
+    }
+    return remainingPerLine; // Map(lineId -> qty remaining)
+  }
+
+  function calcTotalsForLines(lines, vatDefault = 15) {
+    return sumDoc(lines.map(ln => ({
+      qty: ln.qty,
+      unitPrice: ln.unitPrice ?? ln.unitCost ?? 0,
+      discountPct: ln.discountPct ?? 0,
+      taxRate: ln.taxRate ?? vatDefault,
+    })));
+  }
+
+  async function createCreditNoteFromInvoice(invoiceId, creditQtyByLineId) {
+    const { inv, lines } = await loadInvoice(invoiceId);
+    const settings = (await get("settings", "app"))?.value || {};
+    const vatDefault = settings.vatRate ?? 15;
+
+    // Build SCN lines (negative qty)
+    const creditLines = [];
+    for (const ln of lines) {
+      const qToCredit = Number(creditQtyByLineId[ln.id] || 0);
+      if (!qToCredit) continue;
+      creditLines.push({
+        id: randId(),
+        docId: null, // set after SCN doc is created
+        itemId: ln.itemId,
+        itemName: ln.itemName,
+        qty: -Math.abs(qToCredit), // negative on the doc
+        unitPrice: Number(ln.unitPrice ?? ln.unitCost ?? 0),
+        discountPct: Number(ln.discountPct ?? 0),
+        taxRate: Number(ln.taxRate ?? vatDefault),
+        sourceLineId: ln.id, // helpful for audits
+      });
+    }
+
+    if (!creditLines.length) throw new Error("No quantities selected to credit.");
+
+    // Totals (negative)
+    const totals = calcTotalsForLines(creditLines, vatDefault);
+
+    // Create SCN doc
+    const scn = {
+      id: randId(),
+      type: __CREDIT_CFG.CREDIT_DOC_TYPE,
+      no: await nextDocNo(__CREDIT_CFG.CREDIT_DOC_TYPE),
+      customerId: inv.customerId,
+      warehouseId: inv.warehouseId || "WH1",
+      dates: { issue: nowISO().slice(0,10) },
+      status: "PROCESSED",
+      relatedDocId: inv.id,
+      createdAt: nowISO(),
+      processedAt: nowISO(),
+      totals, // negative values expected
+      notes: `Credit for ${inv.type} ${inv.no}`,
+    };
+    await put("docs", scn);
+
+    // Persist lines
+    for (const cl of creditLines) { cl.docId = scn.id; await put("lines", cl); }
+
+    // Write stock return movements (qtyDelta > 0 puts stock back)
+    for (const cl of creditLines) {
+      const qty = Math.abs(cl.qty);
+      if (qty <= 0) continue;
+      await add("movements", {
+        id: randId(),
+        itemId: cl.itemId,
+        warehouseId: scn.warehouseId || "WH1",
+        type: __CREDIT_CFG.MOVEMENT_TYPE,
+        qtyDelta: qty,
+        relatedDocId: scn.id,
+        timestamp: nowISO(),
+        note: `${__CREDIT_CFG.CREDIT_DOC_TYPE} ${scn.no} ${cl.itemId || ""}`,
+      });
+    }
+
+    // Record adjustment to reduce customer balance (if adjustments store exists)
+    try {
+      await add("adjustments", {
+        id: randId(),
+        kind: "CUSTOMER_CREDIT",
+        customerId: inv.customerId,
+        docId: scn.id,
+        relatedDocId: inv.id,
+        amount: Math.abs(totals.grandTotal || 0), // positive amount reduces balance
+        createdAt: nowISO(),
+      });
+    } catch { /* optional store */ }
+
+    // PDF preview
+    try {
+      const data = await getInvoiceHTML(scn.id, { doc: scn, lines: creditLines });
+      window.showPdfOverlay?.(data.html, data.title);
+    } catch (e) {
+      console.warn("[SCN] PDF overlay failed; falling back to window:", e);
+      try { await downloadInvoicePDF(scn.id, { doc: scn, lines: creditLines }); } catch {}
+    }
+
+    toast?.(`Credit Note ${scn.no} created`, "success");
+    return scn;
+  }
+
+  window.openCreditNoteWizard = async function openCreditNoteWizard(invoiceId) {
+    const { inv, lines } = await loadInvoice(invoiceId);
+    const remainingPerLine = await computeRemainingByLine(inv, lines);
+    const { m, body } = ensureAppModal();
+    if (!m || !body) throw new Error("Modal container not found");
+
+    const rows = lines.map(ln => {
+      const invoiced = Math.abs(Number(ln.qty) || 0);
+      const remaining = remainingPerLine.get(ln.id) || 0;
+      return `
+        <tr data-line="${ln.id}">
+          <td>${ln.itemName || ln.itemId || ""}</td>
+          <td class="r">${invoiced}</td>
+          <td class="r">${remaining}</td>
+          <td class="r"><input type="number" min="0" step="0.001" value="${remaining}" data-qty style="width:110px"></td>
+        </tr>`;
+    }).join("");
+
+    body.innerHTML = `
+      <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
+        <h3>Create Credit Note for ${inv.type} ${inv.no}</h3>
+        <div class="row">
+          <button class="btn success" id="scn_create" type="button">Create Credit</button>
+          <button class="btn" id="scn_close" type="button">Close</button>
+        </div>
+      </div>
+      <div class="bd">
+        <div class="sub">Adjust quantities to credit (default = remaining). Prices, VAT and discounts mirror the invoice.</div>
+        <div style="max-height:52vh;overflow:auto;margin-top:8px">
+          <table class="table">
+            <thead>
+              <tr><th>Item</th><th class="r">Invoiced</th><th class="r">Remaining</th><th class="r">Credit Qty</th></tr>
+            </thead>
+            <tbody id="scn_rows">${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    $("#scn_close").onclick = () => m.close();
+    $("#scn_create").onclick = async () => {
+      const map = {};
+      let any = false;
+      $$('#scn_rows [data-line]').forEach(tr => {
+        const lnId = tr.dataset.line;
+        const input = tr.querySelector("[data-qty]");
+        const max = Number(tr.children[2].textContent) || 0;
+        const val = Math.min(max, Math.max(0, Number(input?.value || 0)));
+        if (val > 0) { map[lnId] = round2(val); any = true; }
+      });
+      if (!any) { alert("Enter at least one quantity to credit."); return; }
+      try {
+        await createCreditNoteFromInvoice(inv.id, map);
+        m.close();
+        // refresh invoices list if available
+        window.renderInvoices?.();
+      } catch (e) {
+        console.error(e);
+        alert(e?.message || e);
+      }
+    };
+
+    m.showModal();
+  };
+})();
+
+// ===========================================================================
+// Existing Sales List + Form
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE", opts = {}) {
@@ -276,156 +554,6 @@ async function openDocForm(kind, docId, opts = {}) {
     );
   }
 
-  // PDF module loader (for overlay)
-  async function ensurePdfModule() {
-    if (typeof window.getInvoiceHTML === "function") return true;
-    if (window.__pdfModuleLoading) {
-      await window.__pdfModuleLoading;
-      return typeof window.getInvoiceHTML === "function";
-    }
-    const candidates = ["60-pdf.js", "/60-pdf.js", "/split/60-pdf.js"];
-    window.__pdfModuleLoading = (async () => {
-      for (const src of candidates) {
-        try {
-          await new Promise((resolve, reject) => {
-            const s = document.createElement("script");
-            s.src = src;
-            s.defer = true;
-            s.onload = resolve;
-            s.onerror = reject;
-            document.head.appendChild(s);
-          });
-          if (typeof window.getInvoiceHTML === "function") return true;
-        } catch (_) {}
-      }
-      return false;
-    })();
-    const ok = await window.__pdfModuleLoading;
-    return ok === true;
-  }
-
-  function showPdfOverlay(html, title) {
-    const host = document.getElementById("modal") || document.body;
-    const overlay = document.createElement("div");
-    overlay.style.cssText = `
-      position: fixed; inset: 0; background: rgba(0,0,0,.45);
-      display:flex; align-items:center; justify-content:center; z-index:2147483647;`;
-    overlay.innerHTML = `
-      <div class="card" style="width:min(900px,96vw);height:min(90vh,900px);display:flex;flex-direction:column;overflow:hidden">
-        <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <b>${title || "Document"}</b>
-          <div class="row" style="gap:8px">
-            <button type="button" class="btn" id="pdf_print">Print</button>
-            <button type="button" class="btn" id="pdf_close">Close</button>
-          </div>
-        </div>
-        <div class="bd" style="flex:1;overflow:hidden">
-          <iframe id="pdf_iframe" style="width:100%;height:100%;border:0;background:#fff"></iframe>
-        </div>
-      </div>`;
-    host.appendChild(overlay);
-
-    const iframe = overlay.querySelector("#pdf_iframe");
-    const btnPrint = overlay.querySelector("#pdf_print");
-    const btnClose = overlay.querySelector("#pdf_close");
-
-    const idoc = iframe.contentDocument;
-    try { idoc.open(); idoc.write(html); idoc.close(); } catch (e) { console.error(e); }
-
-    btnPrint.onclick = () => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { console.error(e); } };
-    btnClose.onclick = () => overlay.remove();
-  }
-
-  function openItemPicker({ initialQuery = "" } = {}) {
-    if (readOnly) return;
-    const host = document.getElementById("modal") || document.body;
-
-    const wrap = document.createElement("div");
-    wrap.className = "picker-overlay";
-    wrap.style.cssText = `
-      position:fixed; inset:0; background:rgba(0,0,0,.35);
-      display:flex; align-items:center; justify-content:center; z-index:2147483647;`;
-    wrap.innerHTML = `
-      <div class="card" style="width:min(880px,94vw);max-height:80vh;overflow:auto;padding:12px;position:relative;z-index:2147483647;">
-        <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <b>Find Item</b>
-          <div class="row" style="gap:8px">
-            <input id="ip_search" placeholder="Search code, name, or barcode" style="min-width:320px">
-            <button type="button" class="btn" id="ip_done">Done</button>
-          </div>
-        </div>
-        <div class="bd">
-          <table class="table small">
-            <thead>
-              <tr><th>Code</th><th>Name</th><th class="r">Price</th><th class="r" style="width:120px">Qty</th><th class="r" style="width:90px"></th></tr>
-            </thead>
-            <tbody id="ip_rows"></tbody>
-          </table>
-        </div>
-      </div>`;
-    host.appendChild(wrap);
-
-    const rows = wrap.querySelector("#ip_rows");
-    const search = wrap.querySelector("#ip_search");
-    const btnDone = wrap.querySelector("#ip_done");
-    const closePicker = () => wrap.remove();
-
-    const render = (q = "") => {
-      const qq = q.toLowerCase().trim();
-      const filtered = !qq
-        ? items
-        : items.filter(
-            (it) =>
-              (it.name || "").toLowerCase().includes(qq) ||
-              (it.code || "").toLowerCase().includes(qq) ||
-              (it.sku || "").toLowerCase().includes(qq) ||
-              (it.barcode || "").toLowerCase().includes(qq) ||
-              (it.id || "").toString().toLowerCase().includes(qq)
-          );
-
-      rows.innerHTML =
-        filtered
-          .map(
-            (it, i) => `
-        <tr data-i="${i}">
-          <td>${it.code || it.sku || it.id || ""}</td>
-          <td>${it.name}</td>
-          <td class="r">${currency(it.sellPrice)}</td>
-          <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
-          <td class="r"><button type="button" class="btn" data-add>Add</button></td>
-        </tr>`
-          )
-          .join("") || `<tr><td colspan="5" class="muted">No matches</td></tr>`;
-
-      rows.querySelectorAll("tr[data-i]").forEach((tr) => {
-        const idx = +tr.dataset.i;
-        const it = filtered[idx];
-        const qtyEl = tr.querySelector("[data-qty]");
-        const addBtn = tr.querySelector("[data-add]");
-        const getQty = () => Number(qtyEl?.value || 1) || 1;
-
-        addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); addLineFromItem(it, getQty()); closePicker(); };
-        tr.ondblclick = () => { addLineFromItem(it, getQty()); closePicker(); };
-      });
-
-      search.onkeydown = (e) => {
-        if (e.key === "Enter" && filtered.length === 1) {
-          e.preventDefault(); e.stopPropagation();
-          addLineFromItem(filtered[0], 1);
-          closePicker();
-        }
-      };
-    };
-
-    wrap.addEventListener("click", (e) => { if (e.target === wrap) closePicker(); });
-    btnDone.onclick = (e) => { e.preventDefault(); e.stopPropagation(); closePicker(); };
-    search.oninput = () => render(search.value);
-
-    render(initialQuery);
-    search.value = initialQuery;
-    setTimeout(() => search.focus(), 0);
-  }
-
   // ---------- draw ----------
   const draw = () => {
     body.innerHTML = `
@@ -435,9 +563,10 @@ async function openDocForm(kind, docId, opts = {}) {
           ${readOnly ? "" : `<input id="sd_code" placeholder="Enter/scan product code" style="min-width:220px">`}
           ${readOnly ? "" : `<button type="button" class="btn" id="sd_add">+ Add Item</button>`}
           <button type="button" class="btn" id="sd_pdf">PDF</button>
+          ${editing && kind === "INVOICE" ? `<button type="button" class="btn" id="sd_credit">Credit</button>` : ""}
           ${!readOnly && editing && kind === "QUOTE" ? `<button type="button" class="btn" id="sd_convert">Convert → Sales Order</button>` : ""}
           ${!readOnly && editing && kind === "ORDER" ? `<button type="button" class="btn" id="sd_convert">Convert → Invoice</button>` : ""}
-          ${!readOnly && editing ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
+          ${!readOnly && editing && kind !== "INVOICE" ? `<button type="button" class="btn warn" id="sd_delete">Delete</button>` : ""}
           ${!readOnly ? `<button type="button" class="btn success" id="sd_save">${editing ? "Save" : "Create"}</button>` : ""}
           <button type="button" class="btn" id="sd_close">Close</button>
         </div>
@@ -478,7 +607,7 @@ async function openDocForm(kind, docId, opts = {}) {
 
     if (!readOnly) {
       // Add item & code entry
-      actions.querySelector("#sd_add").addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openItemPicker(); });
+      actions.querySelector("#sd_add")?.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openItemPicker(); });
       const codeEl = $("#sd_code");
       codeEl?.addEventListener("keydown", (e) => {
         if (e.key !== "Enter") return;
@@ -584,25 +713,17 @@ async function openDocForm(kind, docId, opts = {}) {
         };
       }
 
-      // Delete
+      // Delete (hidden for INVOICE; guard anyway)
       const delBtn = $("#sd_delete");
       if (delBtn) {
         delBtn.addEventListener("click", async (e) => {
           e.preventDefault(); e.stopPropagation();
+          if (kind === "INVOICE") {
+            toast("Customer invoices cannot be deleted. Use Credit instead.", "warn");
+            return;
+          }
           if (!confirm(`Delete this ${kind}?`)) return;
 
-          if (kind === "INVOICE") {
-            for (const ln of lines) {
-              const item = await get("items", ln.itemId);
-              if (!item || item.nonStock) continue;
-              await add("movements", {
-                id: randId(), itemId: item.id, warehouseId: doc.warehouseId || "WH1",
-                type: "SALE_REVERSE", qtyDelta: +ln.qty,
-                costImpact: -round2((item.costAvg || 0) * (+ln.qty || 0)),
-                relatedDocId: doc.id, timestamp: nowISO(), note: `Delete ${doc.no}`,
-              });
-            }
-          }
           const exLines = await whereIndex("lines", "by_doc", doc.id);
           await Promise.all(exLines.map((l) => del("lines", l.id)));
           await del("docs", doc.id);
@@ -614,15 +735,20 @@ async function openDocForm(kind, docId, opts = {}) {
       }
     }
 
-    // PDF (non-blocking overlay; modal stays open behind)
+    // PDF
     actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
       e.preventDefault(); e.stopPropagation();
-      const ok = await ensurePdfModule();
-      if (!ok || typeof window.getInvoiceHTML !== "function") { toast?.("PDF module not available (60-pdf.js)"); return; }
       try {
         const { title, html } = await window.getInvoiceHTML(doc.id, { doc, lines });
-        showPdfOverlay(html, title);
+        window.showPdfOverlay?.(html, title);
       } catch (err) { console.error(err); toast?.("PDF render failed"); }
+    });
+
+    // Credit (Invoices)
+    document.getElementById("sd_credit")?.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      try { window.openCreditNoteWizard(doc.id); }
+      catch (err) { console.error(err); alert(err?.message || err); }
     });
 
     wireAllRows();
