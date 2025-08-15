@@ -1,32 +1,30 @@
 // ===========================================================================
 // 50-sales-documents-quotes-orders-invoices.js
-// Sales Documents (Quotes / Orders / Invoices) with History flows and
-// archived-customer filtering (archived customers excluded from new docs).
+// Sales Documents (Quotes / Orders / Invoices), item picker, conversions.
+// Credits: processed, read-only SCN (no editing), printable & emailable.
 //
 // Depends on: 01-db.js, 02-helpers.js
-// Optional: adjustStockOnInvoice (called for INVOICE saves)
-// Works with: 60-pdf.js (window.getInvoiceHTML for overlay preview)
-//
-// Added in this revision:
-// - Fix: "Add Item" opens the item picker modal for Quotes/Orders/Invoices.
-// - Credit Notes (SCN) and "Credited Invoices" view toggle.
-// - Delete is blocked for Invoices: use Credit instead.
-// - Inline PDF overlay viewer.
+// Works with: 60-pdf.js (getInvoiceHTML + getDocEmailDraft)
 // ===========================================================================
 
 const __CREDIT_CFG = {
-  CUSTOMER_INVOICE_TYPES: new Set(["INVOICE"]), // if you also use "SINV", add it here
+  CUSTOMER_INVOICE_TYPES: new Set(["INVOICE"]), // add "SINV" if you use it
   CREDIT_DOC_TYPE: "SCN",
   MOVEMENT_TYPE: "SALE_RETURN",
 };
 
-// ---------- Lightweight PDF overlay (shared by Invoice + Credit Note) ----------
+// ---------- Lightweight document overlay (inline preview) ----------
 (function () {
-  if (window.showPdfOverlay) return; // keep single global instance if reloaded
+  if (window.showPdfOverlay) return; // singleton
 
-  window.showPdfOverlay = function showPdfOverlay(html, title) {
+  window.showPdfOverlay = function showPdfOverlay(html, title, opts = {}) {
     const host = document.getElementById("modal") || document.body;
+
+    // Remove any existing overlay first (clean reopen)
+    document.getElementById("doc_overlay_portal")?.remove();
+
     const overlay = document.createElement("div");
+    overlay.id = "doc_overlay_portal";
     overlay.style.cssText = `
       position: fixed; inset: 0; background: rgba(0,0,0,.45);
       display:flex; align-items:center; justify-content:center; z-index:2147483647;`;
@@ -35,30 +33,50 @@ const __CREDIT_CFG = {
         <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
           <b>${title || "Document"}</b>
           <div class="row" style="gap:8px">
-            <button type="button" class="btn" id="pdf_print">Print</button>
-            <button type="button" class="btn" id="pdf_close">Close</button>
+            ${opts.emailDraft ? `<button type="button" class="btn" id="doc_email">Email</button>` : ""}
+            <button type="button" class="btn" id="doc_print">Print</button>
+            <button type="button" class="btn" id="doc_newtab">Open in new tab</button>
+            <button type="button" class="btn" id="doc_close">Close</button>
           </div>
         </div>
         <div class="bd" style="flex:1;overflow:hidden">
-          <iframe id="pdf_iframe" style="width:100%;height:100%;border:0;background:#fff"></iframe>
+          <iframe id="doc_iframe" style="width:100%;height:100%;border:0;background:#fff"></iframe>
         </div>
       </div>`;
     host.appendChild(overlay);
 
-    const iframe = overlay.querySelector("#pdf_iframe");
-    const btnPrint = overlay.querySelector("#pdf_print");
-    const btnClose = overlay.querySelector("#pdf_close");
-
+    const iframe = overlay.querySelector("#doc_iframe");
     const idoc = iframe.contentDocument;
     try { idoc.open(); idoc.write(html); idoc.close(); } catch (e) { console.error(e); }
 
-    btnPrint.onclick = () => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { console.error(e); } };
-    btnClose.onclick = () => overlay.remove();
+    overlay.querySelector("#doc_print").onclick = () => {
+      try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { console.error(e); }
+    };
+    overlay.querySelector("#doc_newtab").onclick = () => {
+      const w = window.open("", "_blank", "noopener");
+      if (w) { w.document.open(); w.document.write(html); w.document.close(); }
+    };
+    overlay.querySelector("#doc_close").onclick = () => overlay.remove();
+
+    if (opts.emailDraft) {
+      overlay.querySelector("#doc_email").onclick = () => {
+        const { to, subject, body } = opts.emailDraft;
+        const mailto = [
+          "mailto:",
+          encodeURIComponent(to || ""),
+          "?subject=",
+          encodeURIComponent(subject || ""),
+          "&body=",
+          encodeURIComponent(body || "")
+        ].join("");
+        window.location.href = mailto;
+      };
+    }
   };
 })();
 
 // ===========================================================================
-// Credits (SCN) — create from an Invoice
+// Credits (SCN) — processed, read-only; print/email; never editable
 // Public: window.openCreditNoteWizard(invoiceId)
 // ===========================================================================
 (function attachCreditsAPI() {
@@ -78,7 +96,7 @@ const __CREDIT_CFG = {
     return { inv, lines };
   }
 
-  // Build item-level totals for invoiced & credited so we can compute per-line remaining safely
+  // Snapshot remaining per line (handles repeated items across lines)
   async function computeRemainingByLine(inv, lines) {
     const invByItem = new Map();
     for (const ln of lines) {
@@ -86,7 +104,6 @@ const __CREDIT_CFG = {
       invByItem.set(k, (invByItem.get(k) || 0) + Math.abs(Number(ln.qty) || 0));
     }
 
-    // Sum credits already applied for this invoice (by relatedDocId), item-level
     const docs = await all("docs");
     const credits = (docs || []).filter(d => d.type === __CREDIT_CFG.CREDIT_DOC_TYPE && d.relatedDocId === inv.id);
     const creditedByItem = new Map();
@@ -94,7 +111,7 @@ const __CREDIT_CFG = {
       const cls = await whereIndex("lines", "by_doc", scn.id);
       for (const ln of cls) {
         const k = ln.itemId;
-        const q = Math.abs(Number(ln.qty) || 0); // SCN lines will store negative qty, so abs here
+        const q = Math.abs(Number(ln.qty) || 0);
         creditedByItem.set(k, (creditedByItem.get(k) || 0) + q);
       }
     }
@@ -105,7 +122,6 @@ const __CREDIT_CFG = {
       remainingByItem.set(k, Math.max(0, round2(totInv - cred)));
     }
 
-    // Distribute remaining per line, in order, so we don't exceed item totals if repeated lines exist
     const remainingPerLine = new Map();
     for (const ln of lines) {
       const k = ln.itemId;
@@ -114,7 +130,7 @@ const __CREDIT_CFG = {
       remainingPerLine.set(ln.id, lineMax);
       remainingByItem.set(k, Math.max(0, round2(leftForItem - lineMax)));
     }
-    return remainingPerLine; // Map(lineId -> qty remaining)
+    return remainingPerLine;
   }
 
   function calcTotalsForLines(lines, vatDefault = 15) {
@@ -141,7 +157,7 @@ const __CREDIT_CFG = {
         docId: null, // set after SCN doc is created
         itemId: ln.itemId,
         itemName: ln.itemName,
-        qty: -Math.abs(qToCredit), // negative on the doc
+        qty: -Math.abs(qToCredit),       // negative on the doc
         unitPrice: Number(ln.unitPrice ?? ln.unitCost ?? 0),
         discountPct: Number(ln.discountPct ?? 0),
         taxRate: Number(ln.taxRate ?? vatDefault),
@@ -154,7 +170,7 @@ const __CREDIT_CFG = {
     // Totals (negative)
     const totals = calcTotalsForLines(creditLines, vatDefault);
 
-    // Create SCN doc
+    // Create SCN doc (read-only + processed)
     const scn = {
       id: randId(),
       type: __CREDIT_CFG.CREDIT_DOC_TYPE,
@@ -163,10 +179,11 @@ const __CREDIT_CFG = {
       warehouseId: inv.warehouseId || "WH1",
       dates: { issue: nowISO().slice(0,10) },
       status: "PROCESSED",
+      readOnly: true,                  // <- ensure not editable if ever opened
       relatedDocId: inv.id,
       createdAt: nowISO(),
       processedAt: nowISO(),
-      totals, // negative values expected
+      totals,                          // negative values expected
       notes: `Credit for ${inv.type} ${inv.no}`,
     };
     await put("docs", scn);
@@ -203,12 +220,13 @@ const __CREDIT_CFG = {
       });
     } catch { /* optional store */ }
 
-    // PDF preview
+    // Build preview + email draft and show overlay
     try {
-      const data = await getInvoiceHTML(scn.id, { doc: scn, lines: creditLines });
-      window.showPdfOverlay?.(data.html, data.title);
+      const { title, html } = await getInvoiceHTML(scn.id, { doc: scn, lines: creditLines });
+      const draft = await getDocEmailDraft(scn.id, { doc: scn, lines: creditLines });
+      window.showPdfOverlay?.(html, title, { emailDraft: draft });
     } catch (e) {
-      console.warn("[SCN] PDF overlay failed; falling back to window:", e);
+      console.warn("[SCN] overlay/email failed; falling back to window:", e);
       try { await downloadInvoicePDF(scn.id, { doc: scn, lines: creditLines }); } catch {}
     }
 
@@ -216,6 +234,7 @@ const __CREDIT_CFG = {
     return scn;
   }
 
+  // Wizard to choose credit quantities; after create → preview/email only (no editor)
   window.openCreditNoteWizard = async function openCreditNoteWizard(invoiceId) {
     const { inv, lines } = await loadInvoice(invoiceId);
     const remainingPerLine = await computeRemainingByLine(inv, lines);
@@ -269,8 +288,8 @@ const __CREDIT_CFG = {
       if (!any) { alert("Enter at least one quantity to credit."); return; }
       try {
         await createCreditNoteFromInvoice(inv.id, map);
+        // Stay on the invoice; the SCN is processed and only shown as preview/email
         m.close();
-        // refresh invoices list if available
         window.renderInvoices?.();
       } catch (e) {
         console.error(e);
@@ -283,7 +302,7 @@ const __CREDIT_CFG = {
 })();
 
 // ===========================================================================
-// Sales list + forms
+// Sales list + forms (Quotes / Orders / Invoices) + item picker + credited toggle
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE", opts = {}) {
@@ -405,7 +424,7 @@ async function openDocForm(kind, docId, opts = {}) {
   const editing = !!docId;
   const existing = editing ? await get("docs", docId) : null;
 
-  // Customers: exclude archived from dropdowns (but show archived if the doc uses one)
+  // Customers: exclude archived for new docs (show archived if doc uses one)
   const allCustomers = (await all("customers")) || [];
   const activeCustomers = allCustomers.filter((c) => !c.archived);
 
@@ -580,7 +599,6 @@ async function openDocForm(kind, docId, opts = {}) {
     const initialQuery = (opts.initialQuery || "").toLowerCase();
     const host = document.getElementById("modal") || document.body;
 
-    // Remove stale
     document.getElementById("sd_picker_overlay")?.remove();
 
     const wrap = document.createElement("div");
@@ -801,7 +819,7 @@ async function openDocForm(kind, docId, opts = {}) {
           doc.convertedToId = newId; doc.status = "CONVERTED"; doc.readOnly = true; await put("docs", doc);
 
           toast("Sales Order created from Quote");
-          m.close(); renderSales("QUOTE"); // remain in Quotes section
+          m.close(); renderSales("QUOTE");
         };
       } else if (convertBtn && kind === "ORDER") {
         convertBtn.onclick = async (e) => {
@@ -837,7 +855,7 @@ async function openDocForm(kind, docId, opts = {}) {
           doc.convertedToId = newId; doc.status = "CONVERTED"; doc.readOnly = true; await put("docs", doc);
 
           toast("Invoice created from Sales Order");
-          m.close(); renderSales("ORDER"); // remain in Orders section
+          m.close(); renderSales("ORDER");
         };
       }
 
@@ -868,11 +886,14 @@ async function openDocForm(kind, docId, opts = {}) {
       e.preventDefault(); e.stopPropagation();
       try {
         const { title, html } = await window.getInvoiceHTML(doc.id, { doc, lines });
-        window.showPdfOverlay?.(html, title);
+        // Also offer email from here (nice bonus)
+        let emailDraft = null;
+        try { emailDraft = await getDocEmailDraft(doc.id, { doc, lines }); } catch {}
+        window.showPdfOverlay?.(html, title, emailDraft ? { emailDraft } : {});
       } catch (err) { console.error(err); toast?.("PDF render failed"); }
     });
 
-    // Credit (Invoices)
+    // Credit (Invoices) — creates processed, read-only SCN; preview/email only
     document.getElementById("sd_credit")?.addEventListener("click", (e) => {
       e.preventDefault(); e.stopPropagation();
       try { window.openCreditNoteWizard(doc.id); }
