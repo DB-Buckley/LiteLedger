@@ -1,73 +1,106 @@
 // ===========================================================================
 // IndexedDB wrapper
+// ===========================================================================
+
 const DB_NAME = "liteledger_mvp";
-const DB_VER = 3; // bump if you add/change stores or indexes
+// Bump this whenever you add/change stores or indexes:
+const DB_VER = 5;
+
 let _dbp;
 
 function openDB() {
   if (_dbp) return _dbp;
+
   _dbp = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VER);
 
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const db = req.result;
+      const upTx = e.target.transaction; // VersionChange transaction
+
+      const hasStore = (name) => db.objectStoreNames.contains(name);
+      const getStore = (name, opts) =>
+        hasStore(name) ? upTx.objectStore(name) : db.createObjectStore(name, opts);
+
+      const ensureIndex = (store, idxName, keyPath, options = {}) => {
+        if (!store.indexNames.contains(idxName)) store.createIndex(idxName, keyPath, options);
+      };
 
       // --- Core stores ---
-      if (!db.objectStoreNames.contains("company")) db.createObjectStore("company", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("users")) db.createObjectStore("users", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("warehouses")) db.createObjectStore("warehouses", { keyPath: "id" });
+      ensureIndex(getStore("company",   { keyPath: "id" }),      "by_id", "id", { unique: true });
+      ensureIndex(getStore("users",     { keyPath: "id" }),      "by_id", "id", { unique: true });
+      ensureIndex(getStore("warehouses",{ keyPath: "id" }),      "by_id", "id", { unique: true });
 
       // --- Settings (keyed by "key") ---
-      if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
+      getStore("settings", { keyPath: "key" }); // typically {key:"app"}
 
       // --- Master data ---
-      if (!db.objectStoreNames.contains("customers")) {
-        const s = db.createObjectStore("customers", { keyPath: "id" });
-        s.createIndex("by_code", "code", { unique: true });
+      {
+        const s = getStore("customers", { keyPath: "id" });
+        ensureIndex(s, "by_code", "code", { unique: true });
       }
-      if (!db.objectStoreNames.contains("suppliers")) {
-        const s = db.createObjectStore("suppliers", { keyPath: "id" });
-        s.createIndex("by_code", "code", { unique: true });
+      {
+        const s = getStore("suppliers", { keyPath: "id" });
+        ensureIndex(s, "by_code", "code", { unique: true });
       }
-      if (!db.objectStoreNames.contains("items")) {
-        const s = db.createObjectStore("items", { keyPath: "id" });
-        s.createIndex("by_sku", "sku", { unique: true });
-        s.createIndex("by_barcode", "barcode", { unique: false });
+      {
+        const s = getStore("items", { keyPath: "id" });
+        ensureIndex(s, "by_sku", "sku", { unique: true });
+        ensureIndex(s, "by_barcode", "barcode", { unique: false });
       }
 
       // --- Documents + lines ---
-      if (!db.objectStoreNames.contains("docs")) {
-        const s = db.createObjectStore("docs", { keyPath: "id" });
-        s.createIndex("by_type", "type", { unique: false });
-        s.createIndex("by_no", "no", { unique: false });
-        s.createIndex("by_customer", "customerId", { unique: false });
-        s.createIndex("by_supplier", "supplierId", { unique: false });
+      {
+        const s = getStore("docs", { keyPath: "id" });
+        ensureIndex(s, "by_type", "type");
+        ensureIndex(s, "by_no", "no");
+        ensureIndex(s, "by_customer", "customerId");
+        ensureIndex(s, "by_supplier", "supplierId");
       }
-      if (!db.objectStoreNames.contains("lines")) {
-        const s = db.createObjectStore("lines", { keyPath: "id" });
-        s.createIndex("by_doc", "docId", { unique: false });
-      }
-
-      // --- Inventory movements ---
-      if (!db.objectStoreNames.contains("movements")) {
-        const s = db.createObjectStore("movements", { keyPath: "id" });
-        s.createIndex("by_item", "itemId", { unique: false });
+      {
+        const s = getStore("lines", { keyPath: "id" });
+        ensureIndex(s, "by_doc", "docId");
       }
 
-      // --- Payments ---
-      if (!db.objectStoreNames.contains("payments")) {
-        const s = db.createObjectStore("payments", { keyPath: "id" });
-        s.createIndex("by_customer", "customerId", { unique: false });
+      // --- Inventory movements (source of truth for on-hand) ---
+      {
+        const s = getStore("movements", { keyPath: "id" });
+        ensureIndex(s, "by_item", "itemId");
+        ensureIndex(s, "by_doc", "relatedDocId");
+      }
+
+      // --- Customer payments (receipts) ---
+      {
+        const s = getStore("payments", { keyPath: "id" });
+        ensureIndex(s, "by_customer", "customerId");
+        ensureIndex(s, "by_date", "date");
+      }
+
+      // --- Supplier payments (AP) ---
+      {
+        const s = getStore("supplierPayments", { keyPath: "id" });
+        ensureIndex(s, "by_supplier", "supplierId");
+        ensureIndex(s, "by_date", "date");
       }
 
       // --- PDF Layouts ---
-      if (!db.objectStoreNames.contains("docLayouts")) {
-        db.createObjectStore("docLayouts", { keyPath: "id" });
+      getStore("docLayouts", { keyPath: "id" });
+
+      // --- Adjustments (manual stock corrections / audits) ---
+      // Schema suggestion:
+      // { id, itemId, warehouseId, qtyDelta, reason, note, userId, relatedDocId, timestamp }
+      {
+        const s = getStore("adjustments", { keyPath: "id" });
+        ensureIndex(s, "by_item", "itemId");
+        ensureIndex(s, "by_warehouse", "warehouseId");
+        ensureIndex(s, "by_date", "timestamp");
+        ensureIndex(s, "by_doc", "relatedDocId");
+        ensureIndex(s, "by_user", "userId");
       }
 
       // --- Misc scratch stores used by UI (drag positions, etc.) ---
-      if (!db.objectStoreNames.contains("dragging")) db.createObjectStore("dragging", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("primary")) db.createObjectStore("primary", { keyPath: "id" });
+      getStore("dragging", { keyPath: "id" });
+      getStore("primary",  { keyPath: "id" });
     };
 
     req.onsuccess = () => resolve(req.result);
