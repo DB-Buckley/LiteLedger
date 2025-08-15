@@ -26,6 +26,13 @@
     await put("primary", { id: PRIMARY_VIEW_KEY, value: v === "processed" ? "processed" : "active" });
   }
 
+  // Ensure our app modal exists
+  function ensureAppModal() {
+    const m = document.getElementById("modal");
+    const body = document.getElementById("modalBody");
+    return (m && body) ? { m, body } : { m: null, body: null };
+  }
+
   // --------------------------- Purchases list --------------------------------
   window.renderPurchases = async function renderPurchases() {
     const v = $("#view");
@@ -97,12 +104,13 @@
 
   // ---------------------- Supplier Invoice (PINV) modal ----------------------
   async function openSupplierInvoiceForm(docId) {
-    const editing = !!docId;
+    const isEditingInitial = !!docId;
     const [suppliers, settings] = await Promise.all([all("suppliers"), get("settings", "app")]);
     const sVal = settings?.value || {};
     const vatDefault = sVal.vatRate ?? 15;
 
-    const doc = editing
+    // Load or start fresh
+    const doc = isEditingInitial
       ? (await get("docs", docId))
       : {
           id: randId(),
@@ -117,9 +125,87 @@
           createdAt: nowISO(),
         };
 
-    const lines = editing ? await whereIndex("lines", "by_doc", doc.id) : [];
+    const lines = isEditingInitial ? await whereIndex("lines", "by_doc", doc.id) : [];
 
-    const m = $("#modal"), body = $("#modalBody");
+    // Helpers
+    async function saveInvoiceAndLines({ replaceLines }) {
+      // Recalc totals
+      const t = sumDoc(lines.map((ln) => ({
+        qty: ln.qty,
+        unitPrice: ln.unitCost ?? ln.unitPrice ?? 0,
+        discountPct: ln.discountPct,
+        taxRate: ln.taxRate ?? vatDefault,
+      })));
+      doc.totals = t;
+      await put("docs", doc);
+
+      if (replaceLines) {
+        const existing = await whereIndex("lines", "by_doc", doc.id);
+        await Promise.all(existing.map((ln) => del("lines", ln.id)));
+      }
+      for (const ln of lines) {
+        ln.docId = doc.id;
+        await put("lines", ln);
+      }
+      return doc;
+    }
+
+    function showMovementSummary(summary) {
+      const { m, body } = ensureAppModal();
+      if (!m || !body) return;
+
+      const title = `Stock movements for PINV ${doc?.no || doc?.id || ""}`;
+      const rows = (summary || []).map(r => `
+        <tr>
+          <td style="white-space:nowrap">${r.sku}</td>
+          <td>${r.itemName || ""}</td>
+          <td class="r">${r.qty}</td>
+          <td class="r">${r.prevOnHand}</td>
+          <td class="r">${r.newOnHand}</td>
+          <td class="r">${(r.unitCost ?? 0).toFixed(2)}</td>
+        </tr>
+      `).join("");
+
+      const textExport = [
+        title,
+        "",
+        "SKU\tName\tQty\tPrev\tNew\tUnitCost",
+        ...summary.map(r => [r.sku, r.itemName || "", r.qty, r.prevOnHand, r.newOnHand, r.unitCost ?? ""].join("\t"))
+      ].join("\n");
+
+      body.innerHTML = `
+        <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
+          <h3>${title}</h3>
+          <div class="row">
+            <button class="btn" id="mov_copy" type="button">Copy</button>
+            <button class="btn" id="mov_close" type="button">Close</button>
+          </div>
+        </div>
+        <div class="bd" style="max-height:60vh;overflow:auto">
+          ${(summary && summary.length) ? `
+          <table class="table">
+            <thead>
+              <tr><th>SKU</th><th>Item</th><th class="r">Qty (+)</th><th class="r">Prev</th><th class="r">New</th><th class="r">Unit Cost</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>` : `<div class="sub">Nothing to process (no stock lines?)</div>`}
+        </div>
+      `;
+      $("#mov_close").onclick = () => document.getElementById("modal").close();
+      $("#mov_copy").onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(textExport);
+          $("#mov_copy").textContent = "Copied!";
+          setTimeout(() => ($("#mov_copy").textContent = "Copy"), 1200);
+        } catch {
+          alert("Copy failed. Select the table and copy manually.");
+        }
+      };
+      m.showModal();
+    }
+
+    // Draw form
+    const { m, body } = ensureAppModal();
     if (!m || !body) return;
 
     const supOpts = (suppliers || [])
@@ -158,12 +244,12 @@
     const draw = () => {
       body.innerHTML = `
         <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
-          <h3>${editing ? "View/Edit" : "New"} Supplier Invoice</h3>
+          <h3>${isEditingInitial ? "View/Edit" : "New"} Supplier Invoice</h3>
           <div class="row">
             <button class="btn" id="pinv_pdf" type="button">PDF</button>
             ${doc.status === "PROCESSED" ? "" : `<button class="btn warn" id="pinv_delete" type="button">Delete</button>`}
-            ${doc.status === "PROCESSED" ? "" : `<button class="btn primary" id="pinv_process" type="button">Process</button>`}
-            <button class="btn success" id="pinv_save" type="button">${editing ? "Save" : "Create"}</button>
+            ${doc.status === "PROCESSED" ? "" : `<button class="btn primary" id="pinv_process" type="button" title="Save & Process">Process</button>`}
+            <button class="btn success" id="pinv_save" type="button">${isEditingInitial ? "Save" : "Create"}</button>
             <button class="btn" id="pinv_close" type="button" onclick="document.getElementById('modal').close()">Close</button>
           </div>
         </div>
@@ -211,7 +297,7 @@
       $("#pinv_wh").oninput = () => (doc.warehouseId = $("#pinv_wh").value);
       $("#pinv_notes").oninput = () => (doc.notes = $("#pinv_notes").value);
 
-      // Quick add by code
+      // Quick add by code / name / barcode
       $("#pi_code").addEventListener("keydown", async (e) => {
         if (e.key !== "Enter") return;
         const code = ($("#pi_code").value || "").trim().toLowerCase();
@@ -241,7 +327,6 @@
           discountPct: 0,
           taxRate: vatDefault,
         });
-        // ensure tbody exists
         rowsTbodyEl = document.getElementById("pinv_rows") || rowsTbodyEl;
         if (!rowsTbodyEl) return;
         rowsTbodyEl.insertAdjacentHTML("beforeend", renderLineRow(lines[lines.length - 1], lines.length - 1));
@@ -283,19 +368,10 @@
       }
       wireRows();
 
-      // Save
+      // Save (Create/Update)
       $("#pinv_save").onclick = async () => {
-        recalc();
-        await put("docs", doc);
-        if (editing) {
-          const existing = await whereIndex("lines", "by_doc", doc.id);
-          await Promise.all(existing.map((ln) => del("lines", ln.id)));
-        }
-        for (const ln of lines) {
-          ln.docId = doc.id;
-          await put("lines", ln);
-        }
-        toast(editing ? "Supplier invoice saved" : "Supplier invoice created", "success");
+        await saveInvoiceAndLines({ replaceLines: isEditingInitial });
+        toast(isEditingInitial ? "Supplier invoice saved" : "Supplier invoice created", "success");
         m.close();
         renderPurchases();
       };
@@ -319,14 +395,34 @@
         };
       }
 
-      // Process (create movements & mark processed)
+      // Process (Save if needed, then process; show movement summary)
       const btnProc = document.getElementById("pinv_process");
       if (btnProc) {
         btnProc.type = "button";
-        btnProc.onclick = async () => {
-          await window.processSupplierInvoice(doc.id);
-          m.close();
-          renderPurchases();
+        btnProc.onclick = async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          try {
+            // Save first if this is a brand new invoice (not yet in DB)
+            const exists = isEditingInitial || !!(await get("docs", doc.id));
+            if (!exists) {
+              await saveInvoiceAndLines({ replaceLines: false });
+              toast("Supplier invoice created", "success");
+            } else {
+              // If editing existing draft, persist any current edits before processing
+              await saveInvoiceAndLines({ replaceLines: true });
+              toast("Supplier invoice saved", "success");
+            }
+
+            const summary = await window.processSupplierInvoice(doc.id); // returns array
+            showMovementSummary(summary);
+
+            // Refresh list behind the modal
+            renderPurchases();
+          } catch (err) {
+            console.error("[PINV] processing failed:", err);
+            alert(`Failed to process invoice: ${err?.message || err}`);
+          }
         };
       }
     };
@@ -441,86 +537,68 @@
   }
 
   // ---------------------- Processing (movements write) -----------------------
+  // Returns a summary array [{ sku, itemName, qty, prevOnHand, newOnHand, unitCost, lineId }]
   window.processSupplierInvoice = async function processSupplierInvoice(docId) {
-    try {
-      const doc = await get("docs", docId);
-      if (!doc) return toast("Supplier invoice not found", "warn");
-      if (doc.status === "PROCESSED") return toast("Already processed", "warn");
+    const doc = await get("docs", docId);
+    if (!doc) throw new Error("Supplier invoice not found");
+    if (doc.type !== "PINV") throw new Error("Wrong document type");
+    if (doc.status === "PROCESSED") return []; // already done
 
-      const [lines, settings] = await Promise.all([
-        whereIndex("lines", "by_doc", doc.id),
-        get("settings", "app"),
-      ]);
-      const vatRateDefault = settings?.value?.vatRate ?? 15;
-      const wh = doc.warehouseId || "WH1";
+    const [lines, settings] = await Promise.all([
+      whereIndex("lines", "by_doc", doc.id),
+      get("settings", "app"),
+    ]);
+    const vatRateDefault = settings?.value?.vatRate ?? 15;
+    const wh = doc.warehouseId || "WH1";
 
-      const summary = [];
-      let created = 0;
+    const summary = [];
+    let created = 0;
 
-      for (const ln of lines) {
-        const item = await get("items", ln.itemId);
-        if (!item || item.nonStock) continue;
+    for (const ln of lines) {
+      const item = await get("items", ln.itemId);
+      if (!item || item.nonStock) continue;
 
-        const qty = Number(ln.qty) || 0;
-        if (qty <= 0) continue;
+      const qty = Number(ln.qty) || 0;
+      if (qty <= 0) continue;
 
-        const unit = Number(ln.unitCost ?? ln.unitPrice ?? 0);
-        const discPct = Number(ln.discountPct) || 0;
-        // ex VAT unit
-        const netUnitExVat = unit * (1 - discPct / 100);
+      const unit = Number(ln.unitCost ?? ln.unitPrice ?? 0);
+      const discPct = Number(ln.discountPct) || 0;
+      const netUnitExVat = unit * (1 - discPct / 100); // ex VAT
+      // Derive on-hand before write
+      const prevOnHand = (Number(item.openingQty) || 0) + (await balanceQty(item.id));
+      const newOnHand = prevOnHand + qty;
 
-        await add("movements", {
-          id: randId(),
-          itemId: item.id,
-          warehouseId: wh,
-          type: "PURCHASE",
-          qtyDelta: qty,
-          costImpact: round2(netUnitExVat * qty),
-          relatedDocId: doc.id,
-          timestamp: nowISO(),
-          note: `PINV ${doc.no} ${item.sku || item.name || ""}`,
-        });
+      await add("movements", {
+        id: randId(),
+        itemId: item.id,
+        warehouseId: wh,
+        type: "PURCHASE",              // qtyDelta > 0 for supplier invoices
+        qtyDelta: qty,
+        costImpact: round2(netUnitExVat * qty),
+        relatedDocId: doc.id,
+        timestamp: nowISO(),
+        note: `PINV ${doc.no} ${item.sku || item.name || ""}`,
+      });
 
-        summary.push({ sku: item.sku || "", name: item.name || "", qty });
-        created++;
-      }
-
-      if (created > 0) {
-        doc.status = "PROCESSED";
-        doc.processedAt = nowISO();
-        await put("docs", doc);
-      }
-
-      // Show summary dialog
-      const m = $("#modal"), body = $("#modalBody");
-      if (m && body) {
-        body.innerHTML = `
-          <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
-            <h3>Processed: ${doc.no}</h3>
-            <div class="row"><button class="btn" type="button" onclick="document.getElementById('modal').close()">Close</button></div>
-          </div>
-          <div class="bd">
-            ${summary.length ? `
-              <div class="sub" style="margin-bottom:8px">Stock added:</div>
-              <table class="table small">
-                <thead><tr><th>SKU</th><th>Item</th><th class="r">Qty</th></tr></thead>
-                <tbody>
-                  ${summary.map(s => `<tr><td>${s.sku}</td><td>${s.name}</td><td class="r">${s.qty}</td></tr>`).join("")}
-                </tbody>
-              </table>
-            ` : `<div class="sub">Nothing to process (no stock lines?)</div>`}
-          </div>
-        `;
-        m.showModal();
-      } else {
-        toast(created ? `Processed ${created} line(s)` : "Nothing to process", created ? "success" : "warn");
-      }
-
-      console.log("[PINV process] wrote movements:", created, "for", { id: doc.id, no: doc.no });
-    } catch (err) {
-      console.error("processSupplierInvoice failed:", err);
-      toast("Failed to process supplier invoice", "warn");
+      summary.push({
+        sku: item.sku || "",
+        itemName: item.name || "",
+        qty,
+        prevOnHand,
+        newOnHand,
+        unitCost: round2(netUnitExVat),
+        lineId: ln.id,
+      });
+      created++;
     }
+
+    if (created > 0) {
+      doc.status = "PROCESSED";
+      doc.processedAt = nowISO();
+      await put("docs", doc);
+    }
+
+    return summary;
   };
 
   // --------------------------- Supplier Payments -----------------------------
@@ -593,7 +671,7 @@
   };
 
   async function openSupplierPaymentForm(supplierId, suppliers, pinvs) {
-    const m = $("#modal"), body = $("#modalBody");
+    const { m, body } = ensureAppModal();
     if (!m || !body) return;
 
     const supplier = suppliers.find(s => s.id === supplierId);
@@ -662,7 +740,7 @@
         const val = round2(inp.value || 0);
         if (val > 0) {
           const remaining = remainingByDoc.get(docId) || 0;
-          if (val > remaining) return; // silently cap by user’s input; or warn if preferred
+          if (val > remaining) return; // silently allow; or show warn if preferred
           allocations.push({ docId, amount: val });
           sumAlloc += val;
         }
