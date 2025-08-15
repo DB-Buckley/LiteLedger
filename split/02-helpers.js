@@ -1,6 +1,6 @@
 // ============================================================================
 // Helpers & Utilities (globals, idempotent)
-// This file safely defines globals only if they aren't already defined.
+// Safely defines globals only if they aren't already defined.
 // ============================================================================
 
 (function () {
@@ -10,6 +10,14 @@
   }
   if (typeof window.$$ !== "function") {
     window.$$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  }
+
+  // Ensure app modal exists (used by various screens)
+  if (!$("#modal")) {
+    const dlg = document.createElement("dialog");
+    dlg.id = "modal";
+    dlg.innerHTML = `<div id="modalBody" class="modal-body"></div>`;
+    document.body.appendChild(dlg);
   }
 
   // ----------------------------- Time / IDs ---------------------------------
@@ -91,54 +99,45 @@
   }
 
   // --------------------------- Inventory helpers ----------------------------
-  // Robust balance calculator: sums all qtyDelta for an item (optionally by warehouse).
-  // Falls back to full scan if the "by_item" index isn't available.
+  // On-hand = sum of movements.qtyDelta for itemId (purchases +, sales - , adjustments +/-)
   if (typeof window.balanceQty !== "function") {
-    window.balanceQty = async (itemId, opts = {}) => {
-      const { warehouseId = null } = opts || {};
-      let movs = [];
+    window.balanceQty = async (itemId) => {
       try {
-        movs = await whereIndex("movements", "by_item", itemId);
+        const movs = await whereIndex("movements", "by_item", itemId);
+        return movs.reduce((s, m) => s + (Number(m.qtyDelta) || 0), 0);
       } catch {
-        movs = await all("movements");
-        movs = (movs || []).filter(m => m.itemId === itemId);
+        return 0;
       }
-      let sum = 0;
-      for (const m of (movs || [])) {
-        if (warehouseId && m.warehouseId !== warehouseId) continue;
-        sum += Number(m.qtyDelta) || 0; // type-agnostic: PURCHASE+, SALE-, ADJUST±, etc.
-      }
-      return sum;
     };
   }
 
+  // Record an adjustment and mirror it into movements so balanceQty() reflects it immediately
   if (typeof window.recordStockAdjustment !== "function") {
-  window.recordStockAdjustment = async function recordStockAdjustment({
-    itemId, warehouseId = "WH1", qtyDelta = 0, reason = "", note = "", userId = null, relatedDocId = null
-  }) {
-    const ts = nowISO();
-    const adj = { id: randId(), itemId, warehouseId, qtyDelta: Number(qtyDelta) || 0,
-                  reason, note, userId, relatedDocId, timestamp: ts };
-    await add("adjustments", adj);
+    window.recordStockAdjustment = async function recordStockAdjustment({
+      itemId, warehouseId = "WH1", qtyDelta = 0, reason = "", note = "", userId = null, relatedDocId = null
+    }) {
+      const ts = nowISO();
+      const adj = { id: randId(), itemId, warehouseId, qtyDelta: Number(qtyDelta) || 0,
+                    reason, note, userId, relatedDocId, timestamp: ts };
+      await add("adjustments", adj);
 
-    // Mirror into movements so on-hand updates via balanceQty()
-    await add("movements", {
-      id: randId(),
-      itemId,
-      warehouseId,
-      type: "ADJUST",
-      qtyDelta: Number(qtyDelta) || 0,
-      costImpact: 0,
-      relatedDocId: relatedDocId || adj.id,
-      timestamp: ts,
-      note: reason ? `Adjust: ${reason}` : "Adjust",
-    });
+      await add("movements", {
+        id: randId(),
+        itemId,
+        warehouseId,
+        type: "ADJUST",
+        qtyDelta: Number(qtyDelta) || 0,
+        costImpact: 0,
+        relatedDocId: relatedDocId || adj.id,
+        timestamp: ts,
+        note: reason ? `Adjust: ${reason}` : "Adjust",
+      });
 
-    return adj.id;
-  };
-}
+      return adj.id;
+    };
+  }
 
-  // -------------------------------- Toasts ----------------------------------
+  // ------------------------------- Toasts -----------------------------------
   if (typeof window.toast !== "function") {
     (function () {
       let host;
@@ -146,7 +145,7 @@
         if (!host) {
           host = document.createElement("div");
           host.id = "toasts";
-          host.style.cssText = "position:fixed;right:16px;bottom:16px;display:grid;gap:8px;z-index:9999";
+          host.style.cssText = "position:fixed;right:16px;bottom:16px;display:grid;gap:8px;z-index:100010";
           document.body.appendChild(host);
         }
         const el = document.createElement("div");
@@ -162,37 +161,52 @@
     })();
   }
 
-  // ------------------------------- Item finder ------------------------------
-  // Legacy finder used by older flows. New flows embed their own picker in the modal.
+  // ------------------------------- Item picker ------------------------------
+  // High z-index overlay that sits above any dialog/modal. Closes after pick.
   if (typeof window.openItemFinder !== "function") {
-    window.openItemFinder = async ({ onPick }) => {
+    window.openItemFinder = async ({ onPick } = {}) => {
       const items = await all("items");
-      const m = $("#modal"), body = $("#modalBody");
-      body.innerHTML = `
-        <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
-          <h3>Select Item</h3>
-          <div class="row">
-            <button class="btn" onclick="document.getElementById('modal').close()">Close</button>
+
+      // If one exists already, remove it before creating a new one
+      $("#itemFinderOverlay")?.remove();
+
+      const overlay = document.createElement("div");
+      overlay.id = "itemFinderOverlay";
+      overlay.style.cssText = `
+        position:fixed; inset:0; background:rgba(0,0,0,.35);
+        display:grid; place-items:center; z-index:100005;`;
+      overlay.innerHTML = `
+        <div class="card" style="width:min(860px,92vw); max-height:80vh; display:flex; flex-direction:column; border-radius:12px; overflow:hidden">
+          <div class="hd" style="display:flex; justify-content:space-between; align-items:center">
+            <b>Select Item</b>
+            <div class="row">
+              <input id="it_find" placeholder="Search code / name / barcode" style="min-width:320px">
+              <button class="btn" id="it_close">Close</button>
+            </div>
           </div>
-        </div>
-        <div class="bd">
-          <div class="toolbar"><input id="it_find" placeholder="Search name / sku / barcode" style="min-width:300px"></div>
-          <div style="max-height:360px;overflow:auto">
+          <div class="bd" style="padding:0; overflow:auto">
             <table class="table">
-              <thead><tr><th>SKU</th><th>Name</th><th>Price</th><th></th></tr></thead>
+              <thead><tr><th>SKU</th><th>Name</th><th>Barcode</th><th class="r">Sell</th><th class="r">Cost</th><th></th></tr></thead>
               <tbody id="it_rows">
                 ${items.map(i => `
                   <tr data-id="${i.id}">
-                    <td>${i.sku || i.code || ""}</td>
+                    <td>${i.sku || ""}</td>
                     <td>${i.name || ""}</td>
-                    <td>${currency(i.sellPrice || i.costAvg || 0)}</td>
-                    <td><button class="btn" data-pick="${i.id}">Choose</button></td>
+                    <td>${i.barcode || ""}</td>
+                    <td class="r">${currency(i.sellPrice || 0)}</td>
+                    <td class="r">${currency(i.costAvg || 0)}</td>
+                    <td><button class="btn" data-pick="${i.id}">Add</button></td>
                   </tr>`).join("")}
               </tbody>
             </table>
           </div>
         </div>`;
-      m.showModal();
+
+      document.body.appendChild(overlay);
+
+      const close = () => overlay.remove();
+
+      $("#it_close").onclick = close;
 
       const filter = () => {
         const q = ($("#it_find").value || "").toLowerCase();
@@ -201,58 +215,40 @@
         });
       };
       $("#it_find").oninput = filter;
+      $("#it_find").focus();
 
+      // Pick by button
       $$("#it_rows [data-pick]").forEach(btn => {
         btn.onclick = () => {
           const it = items.find(x => x.id === btn.dataset.pick);
           if (it && typeof onPick === "function") onPick(it);
-          m.close();
+          close();
         };
       });
-    };
-  }
 
-  // ------------------------ Dashboard defaults helper -----------------------
-  // Works on the FULL settings.value object (creates/repairs value.dashboard).
-  if (typeof window.ensureDashboardDefaults !== "function") {
-    window.ensureDashboardDefaults = (settingsValue) => {
-      if (!settingsValue || typeof settingsValue !== "object") return;
-      const d = (settingsValue.dashboard = settingsValue.dashboard || {});
-      d.grid = d.grid || { cols: 12, rowHeight: 90 };
-      d.sizes = d.sizes || {};
-      d.widgets = d.widgets || {};
+      // Pick by double-click row
+      $$("#it_rows tr").forEach(tr => {
+        tr.ondblclick = () => {
+          const id = tr.getAttribute("data-id");
+          const it = items.find(x => x.id === id);
+          if (it && typeof onPick === "function") onPick(it);
+          close();
+        };
+      });
 
-      const def = (id, x, y, w, h) => ({ id, x, y, w, h, enabled: true });
-      d.widgets.salesTrend   = d.widgets.salesTrend   || def("salesTrend",   0, 0, 6, 4);
-      d.widgets.unpaid       = d.widgets.unpaid       || def("unpaid",       6, 0, 6, 3);
-      d.widgets.lowStock     = d.widgets.lowStock     || def("lowStock",     0, 4, 6, 3);
-      d.widgets.conversion   = d.widgets.conversion   || def("conversion",   6, 3, 6, 3);
-      d.widgets.topCustomers = d.widgets.topCustomers || def("topCustomers", 0, 7, 6, 4);
-      d.widgets.topItems     = d.widgets.topItems     || def("topItems",     6, 6, 6, 4);
-
-      // Back-compat: provide simple sizes map used by resize code
-      const sizes = (d.sizes = d.sizes || {});
-      const sizeDef = {
-        salesTrend:   { w: 3, h: 1 },
-        unpaid:       { w: 1, h: 1 },
-        lowStock:     { w: 1, h: 1 },
-        conversion:   { w: 1, h: 1 },
-        topCustomers: { w: 2, h: 2 },
-        topItems:     { w: 2, h: 2 },
-      };
-      for (const [k, sz] of Object.entries(sizeDef)) {
-        if (!sizes[k]) sizes[k] = sz;
-      }
+      // Escape to close
+      const esc = (e) => { if (e.key === "Escape") { close(); window.removeEventListener("keydown", esc); } };
+      window.addEventListener("keydown", esc);
     };
   }
 
   // ----------------------------- PDF generator ------------------------------
-  // Fallback PDF builder if your HTML->PDF module (60-pdf.js) isn't loaded.
+  // NOTE: Your 60-pdf.js can call buildInvoicePDF_lib() and handle window/print UX.
   if (typeof window.buildInvoicePDF_lib !== "function") {
     window.buildInvoicePDF_lib = async function buildInvoicePDF_lib({ doc, lines = [], company, customer, settings }) {
       const { PDFDocument, StandardFonts, rgb } = (window.PDFLib || {});
       if (!PDFDocument) {
-        console.warn("pdf-lib not loaded; returning empty blob");
+        console.warn("pdf-lib not loaded; returning placeholder blob");
         return new Blob(["PDF generation unavailable"], { type: "application/pdf" });
       }
 
