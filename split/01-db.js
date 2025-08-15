@@ -4,7 +4,7 @@
 
 const DB_NAME = "liteledger_mvp";
 // Bump this whenever you add/change stores or indexes:
-const DB_VER = 5;
+const DB_VER = 6;
 
 let _dbp;
 
@@ -27,9 +27,9 @@ function openDB() {
       };
 
       // --- Core stores ---
-      ensureIndex(getStore("company",   { keyPath: "id" }),      "by_id", "id", { unique: true });
-      ensureIndex(getStore("users",     { keyPath: "id" }),      "by_id", "id", { unique: true });
-      ensureIndex(getStore("warehouses",{ keyPath: "id" }),      "by_id", "id", { unique: true });
+      ensureIndex(getStore("company",    { keyPath: "id" }), "by_id", "id", { unique: true });
+      ensureIndex(getStore("users",      { keyPath: "id" }), "by_id", "id", { unique: true });
+      ensureIndex(getStore("warehouses", { keyPath: "id" }), "by_id", "id", { unique: true });
 
       // --- Settings (keyed by "key") ---
       getStore("settings", { keyPath: "key" }); // typically {key:"app"}
@@ -87,7 +87,6 @@ function openDB() {
       getStore("docLayouts", { keyPath: "id" });
 
       // --- Adjustments (manual stock corrections / audits) ---
-      // Schema suggestion:
       // { id, itemId, warehouseId, qtyDelta, reason, note, userId, relatedDocId, timestamp }
       {
         const s = getStore("adjustments", { keyPath: "id" });
@@ -104,7 +103,7 @@ function openDB() {
     };
 
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror   = () => reject(req.error);
     req.onblocked = () => console.warn("IndexedDB upgrade blocked. Close other tabs.");
   });
 
@@ -120,8 +119,33 @@ function openDB() {
 }
 
 async function tx(stores, mode = "readonly") {
-  const db = await openDB();
-  return db.transaction(stores, mode);
+  const wanted = Array.isArray(stores) ? stores : [stores];
+  let db = await openDB();
+
+  // If any requested store is missing (old connection cached), reopen to apply upgrade.
+  for (const s of wanted) {
+    if (!db.objectStoreNames.contains(s)) {
+      console.warn(`[DB] Missing store "${s}". Reopening DB to apply upgrade…`);
+      try { db.close?.(); } catch {}
+      _dbp = null;              // drop cached connection
+      db = await openDB();      // re-open (will run onupgradeneeded if DB_VER bumped)
+      break;
+    }
+  }
+
+  // Try to open the transaction; if NotFoundError, reopen once and retry.
+  try {
+    return db.transaction(wanted, mode);
+  } catch (err) {
+    if (err && String(err.name || err).includes("NotFoundError")) {
+      console.warn("[DB] Transaction failed due to missing store(s); reopening and retrying once…");
+      try { db.close?.(); } catch {}
+      _dbp = null;
+      db = await openDB();
+      return db.transaction(wanted, mode);
+    }
+    throw err;
+  }
 }
 
 // --- Basic CRUD helpers (globals) ---
@@ -131,7 +155,7 @@ async function get(store, key) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).get(key);
     r.onsuccess = () => res(r.result || null);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -140,7 +164,7 @@ async function put(store, value) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).put(value);
     r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -149,7 +173,7 @@ async function add(store, value) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).add(value);
     r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -158,7 +182,7 @@ async function del(store, key) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).delete(key);
     r.onsuccess = () => res(true);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -167,7 +191,7 @@ async function all(store) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).getAll();
     r.onsuccess = () => res(r.result || []);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -176,7 +200,7 @@ async function whereIndex(store, indexName, key) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).index(indexName).getAll(key);
     r.onsuccess = () => res(r.result || []);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -186,7 +210,7 @@ async function whereRange(store, indexName, IDBKeyRangeInstance) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).index(indexName).getAll(IDBKeyRangeInstance);
     r.onsuccess = () => res(r.result || []);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
 
@@ -196,6 +220,6 @@ async function clearStore(store) {
   return await new Promise((res, rej) => {
     const r = t.objectStore(store).clear();
     r.onsuccess = () => res(true);
-    r.onerror = () => rej(r.error);
+    r.onerror   = () => rej(r.error);
   });
 }
