@@ -11,12 +11,10 @@
 // ============================================================================
 
 (() => {
-  // ------------------------------ STATE -------------------------------------
   let _showProcessed = false; // toolbar toggle
 
   // ------------------------------ STOCK / WAC --------------------------------
   async function previewStockOnPurchase(doc, lines) {
-    // Build a preview array of { item, beforeQty, afterQty, oldAvg, netUnit, newAvg, qty }
     const rows = [];
     for (const ln of (lines || [])) {
       const item = await get("items", ln.itemId);
@@ -46,7 +44,6 @@
 
       const wh = doc.warehouseId || "WH1";
       const qty = Math.max(0, Number(ln.qty) || 0);
-
       const unitCostEx = Number(ln.unitCost) || 0;
       const discountPct = Number(ln.discountPct) || 0;
       const netUnit = round2(unitCostEx * (discountPct ? (1 - discountPct / 100) : 1));
@@ -92,7 +89,7 @@
           <b>Find Item</b>
           <div class="row" style="gap:8px">
             <input id="ip_query" placeholder="Search by code / SKU / name / barcode" style="min-width:320px">
-            <button class="btn" id="ip_close">Close</button>
+            <button type="button" class="btn" id="ip_close">Close</button>
           </div>
         </div>
         <div class="bd">
@@ -141,7 +138,6 @@
         return;
       }
 
-      // compute qty on hand for visible items
       const qtyByItem = new Map();
       for (const it of subset) {
         // eslint-disable-next-line no-await-in-loop
@@ -157,7 +153,7 @@
           <td class="r">${currency(Number(it.costAvg) || 0)}</td>
           <td class="r">${qtyByItem.get(it.id) ?? 0}</td>
           <td class="r"><input type="number" min="1" step="1" value="1" data-qty style="width:70px"></td>
-          <td class="r"><button class="btn" data-add>Add</button></td>
+          <td class="r"><button type="button" class="btn" data-add>Add</button></td>
         </tr>
       `).join("");
 
@@ -274,9 +270,9 @@
           <b>Purchases — ${_showProcessed ? "Processed Supplier Invoices" : "Supplier Invoices"}</b>
           <div class="toolbar">
             <input id="p_search" placeholder="Search PINV no / supplier" style="min-width:240px">
-            <button class="btn" id="p_toggle">${_showProcessed ? "Active Supplier Invoices" : "Processed Supplier Invoices"}</button>
-            <button class="btn" id="p_payments">Supplier Payments / Allocations</button>
-            <button class="btn primary" id="p_new">+ New Supplier Invoice</button>
+            <button type="button" class="btn" id="p_toggle">${_showProcessed ? "Active Supplier Invoices" : "Processed Supplier Invoices"}</button>
+            <button type="button" class="btn" id="p_payments">Supplier Payments / Allocations</button>
+            <button type="button" class="btn primary" id="p_new">+ New Supplier Invoice</button>
           </div>
         </div>
         <div class="bd">
@@ -294,7 +290,7 @@
                   <td>${currency(d.totals?.tax || 0)}</td>
                   <td>${currency(d.totals?.grandTotal || 0)}</td>
                   <td>${d.status === "PROCESSED" ? '<span class="pill">processed</span>' : ""}</td>
-                  <td><button class="btn" data-view="${d.id}">View</button></td>
+                  <td><button type="button" class="btn" data-view="${d.id}">View</button></td>
                 </tr>
               `).join("")}
             </tbody>
@@ -374,7 +370,7 @@
           discountPct: ln.discountPct,
           taxRate: ln.taxRate ?? settings.vatRate,
         }).incTax)}</td>
-        <td>${isProcessed ? "" : `<button class="btn warn" data-del="${idx}">×</button>`}</td>
+        <td>${isProcessed ? "" : `<button type="button" class="btn warn" data-del="${idx}">×</button>`}</td>
       </tr>`;
 
     const recalc = () => {
@@ -397,10 +393,11 @@
         <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
           <h3>${isProcessed ? "View" : (editingDoc ? "View/Edit" : "New")} Supplier Invoice ${isProcessed ? "(Processed)" : ""}</h3>
           <div class="row" style="gap:8px">
-            <button class="btn" id="pinv_pdf">PDF</button>
-            ${!isProcessed ? `<button class="btn success" id="pinv_save">${editingDoc ? "Save" : "Create"}</button>` : ""}
-            ${editingDoc && !isProcessed ? `<button class="btn" id="pinv_process">Process</button>` : ""}
-            <button class="btn" id="pinv_close">Close</button>
+            <button type="button" class="btn" id="pinv_pdf">PDF</button>
+            ${editingDoc && !isProcessed ? `<button type="button" class="btn warn" id="pinv_delete">Delete</button>` : ""}
+            ${!isProcessed ? `<button type="button" class="btn success" id="pinv_save">${editingDoc ? "Save" : "Create"}</button>` : ""}
+            ${editingDoc && !isProcessed ? `<button type="button" class="btn" id="pinv_process">Process</button>` : ""}
+            <button type="button" class="btn" id="pinv_close">Close</button>
           </div>
         </div>
         <div class="bd">
@@ -417,7 +414,7 @@
           ${isProcessed ? "" : `
           <div class="toolbar" style="margin:12px 0; gap:8px">
             <input id="pinv_code" placeholder="Enter SKU / code and press Enter" style="min-width:220px">
-            <button class="btn" id="pinv_add">+ Add Item</button>
+            <button type="button" class="btn" id="pinv_add">+ Add Item</button>
           </div>`}
 
           <div style="overflow:auto;max-height:340px">
@@ -442,8 +439,10 @@
       // Close
       $("#pinv_close").onclick = () => m.close();
 
-      // PDF
-      $("#pinv_pdf").onclick = async () => {
+      // PDF (keep modal open)
+      $("#pinv_pdf").onclick = async (e) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
         const ok = await ensurePdfModule();
         if (ok && typeof window.getInvoiceHTML === "function") {
           try {
@@ -478,6 +477,25 @@
       };
 
       if (!isProcessed) {
+        // Delete (only when not processed)
+        $("#pinv_delete")?.addEventListener("click", async () => {
+          if (!confirm("Delete this supplier invoice?")) return;
+          try {
+            const existing = await whereIndex("lines", "by_doc", doc.id);
+            await Promise.all(existing.map(ln => del("lines", ln.id)));
+            const movs = await all("movements");
+            const old = (movs || []).filter(m => m.relatedDocId === doc.id && m.type === "PURCHASE");
+            await Promise.all(old.map(m => del("movements", m.id)));
+            await del("docs", doc.id);
+            toast("Supplier invoice deleted", "success");
+            m.close();
+            renderPurchases();
+          } catch (err) {
+            console.error("Delete PINV failed:", err);
+            toast("Delete failed", "warn");
+          }
+        });
+
         // Field wiring
         $("#pinv_sup").onchange = () => (doc.supplierId = $("#pinv_sup").value);
         $("#pinv_date").onchange = () => (doc.dates.issue = $("#pinv_date").value);
@@ -578,25 +596,21 @@
 
           toast(editingDoc ? "Supplier invoice updated" : "Supplier invoice created", "success");
           m.close();
-          renderPurchases(); // stay in section
+          renderPurchases();
         };
 
-        // Process (does stock + stamp)
+        // Process (stock update + stamp)
         const processBtn = $("#pinv_process");
         if (processBtn) {
           processBtn.onclick = async () => {
             if (!lines.length) return toast("Add at least one line first", "warn");
-            // Save latest edits before processing
             await $("#pinv_save")?.click?.();
 
-            // Reload saved doc/lines
             const freshDoc = await get("docs", doc.id);
             const freshLines = await whereIndex("lines", "by_doc", doc.id);
 
-            // Build preview
             const preview = await previewStockOnPurchase(freshDoc, freshLines);
 
-            // Confirm dialog
             const overlay = document.createElement("div");
             overlay.style.cssText = `
               position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex;
@@ -606,8 +620,8 @@
                 <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
                   <b>Process Supplier Invoice ${freshDoc.no}</b>
                   <div class="row" style="gap:8px">
-                    <button class="btn success" id="pp_confirm">Confirm</button>
-                    <button class="btn" id="pp_cancel">Cancel</button>
+                    <button type="button" class="btn success" id="pp_confirm">Confirm</button>
+                    <button type="button" class="btn" id="pp_cancel">Cancel</button>
                   </div>
                 </div>
                 <div class="bd">
@@ -658,8 +672,6 @@
   }
 
   // ---------------------- SUPPLIER PAYMENTS / ALLOCATIONS --------------------
-  // Store: "spayments" (supplier payments)
-  // Record: { id, supplierId, date, amount, ref, notes, allocations:[{invoiceId, amount}] }
   async function renderSupplierPayments() {
     const v = $("#view");
     if (!v) return;
@@ -696,8 +708,8 @@
               <option value="">Choose supplier…</option>
               ${supOpts}
             </select>
-            <button class="btn" id="sp_new" disabled>+ New Payment</button>
-            <button class="btn" id="sp_back">Back to Purchases</button>
+            <button type="button" class="btn" id="sp_new" disabled>+ New Payment</button>
+            <button type="button" class="btn" id="sp_back">Back to Purchases</button>
           </div>
         </div>
         <div class="bd">
@@ -820,8 +832,8 @@
         <div class="hd" style="display:flex;justify-content:space-between;align-items:center">
           <h3>Supplier Payment — ${supplier?.name || ""}</h3>
           <div class="row">
-            <button class="btn success" id="sp_save">Save Payment</button>
-            <button class="btn" onclick="document.getElementById('modal').close()">Close</button>
+            <button type="button" class="btn success" id="sp_save">Save Payment</button>
+            <button type="button" class="btn" onclick="document.getElementById('modal').close()">Close</button>
           </div>
         </div>
         <div class="bd">
