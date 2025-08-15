@@ -112,6 +112,32 @@
     };
   }
 
+  if (typeof window.recordStockAdjustment !== "function") {
+  window.recordStockAdjustment = async function recordStockAdjustment({
+    itemId, warehouseId = "WH1", qtyDelta = 0, reason = "", note = "", userId = null, relatedDocId = null
+  }) {
+    const ts = nowISO();
+    const adj = { id: randId(), itemId, warehouseId, qtyDelta: Number(qtyDelta) || 0,
+                  reason, note, userId, relatedDocId, timestamp: ts };
+    await add("adjustments", adj);
+
+    // Mirror into movements so on-hand updates via balanceQty()
+    await add("movements", {
+      id: randId(),
+      itemId,
+      warehouseId,
+      type: "ADJUST",
+      qtyDelta: Number(qtyDelta) || 0,
+      costImpact: 0,
+      relatedDocId: relatedDocId || adj.id,
+      timestamp: ts,
+      note: reason ? `Adjust: ${reason}` : "Adjust",
+    });
+
+    return adj.id;
+  };
+}
+
   // -------------------------------- Toasts ----------------------------------
   if (typeof window.toast !== "function") {
     (function () {
