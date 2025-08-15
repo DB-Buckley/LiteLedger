@@ -393,86 +393,112 @@
     }
 
     // Lightweight overlay picker that sits above the modal
-    async function openItemPickerOverlay({ preset = "", onPick }) {
-      const items = await all("items");
-      const wrap = document.createElement("div");
-      wrap.id = "pi_picker_overlay";
-      wrap.style.cssText = `
-        position:fixed; inset:0; z-index:99999; background:rgba(0,0,0,.45);
-        display:flex; align-items:center; justify-content:center;
-      `;
-      const card = document.createElement("div");
-      card.style.cssText = "background:#fff; width:min(800px,92vw); max-height:80vh; border-radius:12px; box-shadow:0 12px 40px rgba(0,0,0,.25); display:flex; flex-direction:column";
-      card.innerHTML = `
-        <div class="hd" style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #e5e7eb">
-          <b>Select Item</b>
-          <button class="btn" id="pi_picker_close">Close</button>
-        </div>
-        <div class="bd" style="padding:12px 16px; display:grid; gap:10px">
-          <input id="pi_picker_q" placeholder="Search code / name / barcode" value="${preset || ""}" style="min-width:320px">
-          <div style="overflow:auto; max-height:52vh">
-            <table class="table">
-              <thead><tr><th>SKU</th><th>Name</th><th>On Hand</th><th>Price</th><th></th></tr></thead>
-              <tbody id="pi_picker_rows">${renderRows(items)}</tbody>
-            </table>
-          </div>
-        </div>
-      `;
-      wrap.appendChild(card);
-      document.body.appendChild(wrap);
+async function openItemPickerOverlay({ preset = "", onPick }) {
+  const items = await all("items");
 
-      $("#pi_picker_close").onclick = () => wrap.remove();
+  // Fullscreen overlay
+  const wrap = document.createElement("div");
+  wrap.id = "pi_picker_overlay";
+  wrap.tabIndex = -1;
+  wrap.style.cssText = `
+    position:fixed; inset:0; z-index:100000;
+    background:rgba(2,6,23,.85); /* midnight-ish backdrop */
+    display:flex; align-items:center; justify-content:center;
+  `;
 
-      async function onSearch() {
-        const q = ($("#pi_picker_q").value || "").toLowerCase();
-        const list = items.filter((i) =>
-          (i.sku || "").toLowerCase().includes(q) ||
-          (i.name || "").toLowerCase().includes(q) ||
-          String(i.barcode || "").toLowerCase().includes(q)
-        );
-        $("#pi_picker_rows").innerHTML = renderRows(list);
-        wirePickButtons(list);
-      }
+  // Prevent key events (e.g., Esc) from closing the underlying <dialog id="modal">
+  wrap.addEventListener("keydown", (e) => e.stopPropagation(), { capture: true });
 
-      function renderRows(list) {
-        return (list || []).map((it) => `
-          <tr data-id="${it.id}">
-            <td>${it.sku || ""}</td>
-            <td>${it.name || ""}</td>
-            <td class="r" data-oh="oh-${it.id}">…</td>
-            <td class="r">${currency(it.costAvg ?? it.sellPrice ?? 0)}</td>
-            <td><button class="btn" data-pick="${it.id}">Add</button></td>
-          </tr>
-        `).join("");
-      }
+  // Container card
+  const card = document.createElement("div");
+  card.style.cssText = `
+    width:min(900px,94vw); max-height:80vh;
+    background:#0f172a; color:#e2e8f0;
+    border:1px solid #1f2937; border-radius:14px;
+    box-shadow:0 20px 60px rgba(0,0,0,.55);
+    display:flex; flex-direction:column; overflow:hidden;
+  `;
+  card.innerHTML = `
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; background:#0b1220; border-bottom:1px solid #1f2937">
+      <b style="letter-spacing:.2px">Select Item</b>
+      <button type="button" class="btn" id="pi_picker_close">Close</button>
+    </div>
 
-      function wirePickButtons(list) {
-        $$("#pi_picker_rows [data-pick]").forEach((btn) => {
-          btn.onclick = () => {
-            const it = list.find((x) => x.id === btn.dataset.pick);
-            if (it) {
-              onPick?.(it);
-              wrap.remove(); // close after pick
-            }
-          };
-        });
-      }
+    <div style="padding:12px 16px; display:grid; gap:10px; background:#0f172a">
+      <input id="pi_picker_q" placeholder="Search code / name / barcode" value="${preset || ""}"
+             style="min-width:320px; background:#0b1220; color:#e2e8f0; border:1px solid #1f2937; border-radius:8px; padding:8px 10px;">
+      <div style="overflow:auto; max-height:52vh; border:1px solid #1f2937; border-radius:10px">
+        <table class="table" style="width:100%">
+          <thead>
+            <tr style="background:#0b1220">
+              <th>SKU</th><th>Name</th><th class="r">On Hand</th><th class="r">Price</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="pi_picker_rows"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+  wrap.appendChild(card);
+  document.body.appendChild(wrap);
 
-      // initial wire + backfill on-hand asynchronously
-      $("#pi_picker_q").oninput = onSearch;
-      onSearch();
+  const closeOverlay = () => wrap.remove();
+  $("#pi_picker_close").onclick = (e) => { e.preventDefault(); e.stopPropagation(); closeOverlay(); };
 
-      // backfill on-hand values
-      (async () => {
-        for (const it of items) {
-          const ohEl = document.querySelector(`[data-oh="oh-${it.id}"]`);
-          if (!ohEl) continue;
-          const bal = await balanceQty(it.id);
-          const onHand = (Number(it.openingQty) || 0) + bal;
-          ohEl.textContent = onHand;
+  // Render rows helper
+  function rowsHtml(list) {
+    return (list || []).map((it) => `
+      <tr data-id="${it.id}">
+        <td>${it.sku || ""}</td>
+        <td>${it.name || ""}</td>
+        <td class="r" data-oh="oh-${it.id}">…</td>
+        <td class="r">${currency(it.costAvg ?? it.sellPrice ?? 0)}</td>
+        <td><button type="button" class="btn" data-pick="${it.id}">Add</button></td>
+      </tr>
+    `).join("");
+  }
+
+  // Wire up an item list with search
+  async function wireList(list) {
+    $("#pi_picker_rows").innerHTML = rowsHtml(list);
+    // Bind "Add" buttons — prevent bubbling so the parent <dialog> doesn't close
+    $$("#pi_picker_rows [data-pick]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const it = list.find((x) => x.id === btn.dataset.pick);
+        if (it) {
+          onPick?.(it);
+          closeOverlay(); // only close the overlay
         }
-      })();
+      };
+    });
+  }
+
+  // Initial list + search wire
+  const baseList = items.slice();
+  $("#pi_picker_q").oninput = () => {
+    const q = ($("#pi_picker_q").value || "").toLowerCase();
+    const filtered = baseList.filter((i) =>
+      (i.sku || "").toLowerCase().includes(q) ||
+      (i.name || "").toLowerCase().includes(q) ||
+      String(i.barcode || "").toLowerCase().includes(q)
+    );
+    wireList(filtered);
+  };
+  $("#pi_picker_q").dispatchEvent(new Event("input"));
+
+  // Fill on-hand asynchronously
+  (async () => {
+    for (const it of baseList) {
+      const ohEl = document.querySelector(`[data-oh="oh-${it.id}"]`);
+      if (!ohEl) continue;
+      const bal = await balanceQty(it.id);
+      const onHand = (Number(it.openingQty) || 0) + bal;
+      ohEl.textContent = onHand;
     }
+  })();
+}
 
     draw();
   }
