@@ -33,6 +33,50 @@
     return (m && body) ? { m, body } : { m: null, body: null };
   }
 
+  // ===== PDF modal helpers (HTML preview inside a dialog) ====================
+  function ensurePdfModal() {
+    let dlg = document.getElementById("pdf_modal");
+    if (!dlg) {
+      dlg = document.createElement("dialog");
+      dlg.id = "pdf_modal";
+      dlg.style.cssText = "width:min(980px,96vw);max-width:96vw;padding:0;border:none;border-radius:12px;overflow:hidden";
+      document.body.appendChild(dlg);
+    }
+    return dlg;
+  }
+
+  function openHtmlInPdfModal({ html, title = "Document" }) {
+    const dlg = ensurePdfModal();
+    dlg.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#0b1220;color:#e5e7eb">
+        <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
+        <div style="display:flex;gap:8px">
+          <button id="pdf_print" class="btn">Print / Save as PDF</button>
+          <button id="pdf_tab" class="btn">Open in new tab</button>
+          <button id="pdf_close" class="btn">Close</button>
+        </div>
+      </div>
+      <div style="height:80vh;background:#111827">
+        <iframe id="pdf_iframe" style="width:100%;height:100%;border:0" title="PDF Preview"></iframe>
+      </div>
+    `;
+    const iframe = dlg.querySelector("#pdf_iframe");
+    // Use srcdoc for crisp inline preview (no extra blobs/windows)
+    iframe.srcdoc = html;
+
+    dlg.querySelector("#pdf_print").onclick = () => {
+      try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
+    };
+    dlg.querySelector("#pdf_tab").onclick = () => {
+      // New tab: write the HTML directly to avoid popup blockers
+      const w = window.open("", "_blank", "noopener");
+      if (w) { w.document.open(); w.document.write(html); w.document.close(); }
+    };
+    dlg.querySelector("#pdf_close").onclick = () => dlg.close();
+
+    if (!dlg.open) dlg.showModal();
+  }
+
   // --------------------------- Purchases list --------------------------------
   window.renderPurchases = async function renderPurchases() {
     const v = $("#view");
@@ -376,9 +420,21 @@
         renderPurchases();
       };
 
-      // PDF
+      // PDF (preview in modal using 60-pdf.js -> getInvoiceHTML)
       $("#pinv_pdf")?.addEventListener("click", async () => {
-        await downloadInvoicePDF(doc.id, { doc, lines });
+        try {
+          // Persist current edits (if editing) before building PDF
+          if (isEditingInitial) {
+            await saveInvoiceAndLines({ replaceLines: true });
+          }
+          const data = await getInvoiceHTML(doc.id, { doc, lines });
+          openHtmlInPdfModal({ html: data.html, title: data.title });
+        } catch (err) {
+          console.error("[PINV] PDF preview failed:", err);
+          // Fallback to classic open-in-window if needed
+          try { await downloadInvoicePDF(doc.id, { doc, lines }); }
+          catch (e2) { alert(`Could not generate PDF: ${e2?.message || e2}`); }
+        }
       });
 
       // Delete (only if not processed)
