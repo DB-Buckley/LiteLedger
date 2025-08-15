@@ -4,8 +4,8 @@
 // archived-customer filtering (archived customers excluded from new docs).
 //
 // Depends on: 01-db.js, 02-helpers.js
-// Optional: adjustStockOnInvoice
-// Works with: 60-pdf.js (window.getInvoiceHTML)
+// Optional: adjustStockOnInvoice (called for INVOICE saves)
+// Works with: 60-pdf.js (window.getInvoiceHTML for overlay preview)
 // ===========================================================================
 
 async function renderSales(kind = "INVOICE", opts = {}) {
@@ -16,7 +16,7 @@ async function renderSales(kind = "INVOICE", opts = {}) {
   const allDocs = await all("docs");
   let docs = (allDocs || []).filter((d) => d.type === kind);
 
-  // Active vs History
+  // Active vs History split
   if (history) {
     docs = docs.filter((d) => d.status === "CONVERTED" || d.readOnly || d.convertedToId);
   } else {
@@ -85,7 +85,7 @@ async function renderSales(kind = "INVOICE", opts = {}) {
     });
   };
 
-  // Toolbar toggles
+  // Toolbar nav
   $("#d_history")?.addEventListener("click", () => (location.hash = "#/quotes-history"));
   $("#d_back_active")?.addEventListener("click", () => (location.hash = "#/quotes"));
   $("#d_orders_history")?.addEventListener("click", () => (location.hash = "#/orders-history"));
@@ -106,7 +106,7 @@ async function renderSales(kind = "INVOICE", opts = {}) {
 async function openDocForm(kind, docId, opts = {}) {
   const editing = docId ? await get("docs", docId) : null;
 
-  // Load customers and split into active/archived; only ACTIVE appear in dropdowns.
+  // Customers: exclude archived from dropdowns (but show archived if the doc uses one)
   const allCustomers = (await all("customers")) || [];
   const activeCustomers = allCustomers.filter((c) => !c.archived);
 
@@ -129,7 +129,7 @@ async function openDocForm(kind, docId, opts = {}) {
     id: randId(),
     type: kind,
     no: await nextDocNo(kind),
-    customerId: activeCustomers[0]?.id || "", // default to first ACTIVE customer
+    customerId: activeCustomers[0]?.id || "",
     warehouseId: "WH1",
     dates: { issue: nowISO().slice(0, 10), due: nowISO().slice(0, 10) },
     totals: { subTotal: 0, tax: 0, grandTotal: 0 },
@@ -138,16 +138,13 @@ async function openDocForm(kind, docId, opts = {}) {
   };
   const lines = editing ? await whereIndex("lines", "by_doc", doc.id) : [];
 
-  // If this doc’s customer is archived, we still show it (disabled) so the doc can be viewed.
   const theCustomer = allCustomers.find((c) => c.id === doc.customerId);
   const customerIsArchived = !!theCustomer?.archived;
 
-  // Read-only if converted/history as before
   const readOnly =
     !!opts.readOnly || doc.status === "CONVERTED" || !!doc.readOnly || !!doc.convertedToId;
 
-  const m = $("#modal"),
-    body = $("#modalBody");
+  const m = $("#modal"), body = $("#modalBody");
   if (!m || !body) {
     console.error("[SalesDoc] Modal elements #modal/#modalBody not found.");
     return;
@@ -279,7 +276,7 @@ async function openDocForm(kind, docId, opts = {}) {
     );
   }
 
-  // PDF loader (unchanged)
+  // PDF module loader (for overlay)
   async function ensurePdfModule() {
     if (typeof window.getInvoiceHTML === "function") return true;
     if (window.__pdfModuleLoading) {
@@ -515,10 +512,10 @@ async function openDocForm(kind, docId, opts = {}) {
         }
         toast(editing ? `${kind} updated` : `${kind} created`);
         m.close();
-        renderSales(kind); // stay in section
+        renderSales(kind); // stay in the current list section
       });
 
-      // Convert (unchanged behavior: close modal, stay in list)
+      // Convert buttons
       const convertBtn = $("#sd_convert");
       if (convertBtn && kind === "QUOTE") {
         convertBtn.onclick = async (e) => {
@@ -547,7 +544,7 @@ async function openDocForm(kind, docId, opts = {}) {
           doc.convertedToId = newId; doc.status = "CONVERTED"; doc.readOnly = true; await put("docs", doc);
 
           toast("Sales Order created from Quote");
-          m.close(); renderSales("QUOTE");
+          m.close(); renderSales("QUOTE"); // remain in Quotes section
         };
       } else if (convertBtn && kind === "ORDER") {
         convertBtn.onclick = async (e) => {
@@ -583,11 +580,11 @@ async function openDocForm(kind, docId, opts = {}) {
           doc.convertedToId = newId; doc.status = "CONVERTED"; doc.readOnly = true; await put("docs", doc);
 
           toast("Invoice created from Sales Order");
-          m.close(); renderSales("ORDER");
+          m.close(); renderSales("ORDER"); // remain in Orders section
         };
       }
 
-      // Delete (same as before)
+      // Delete
       const delBtn = $("#sd_delete");
       if (delBtn) {
         delBtn.addEventListener("click", async (e) => {
@@ -617,7 +614,7 @@ async function openDocForm(kind, docId, opts = {}) {
       }
     }
 
-    // PDF
+    // PDF (non-blocking overlay; modal stays open behind)
     actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
       e.preventDefault(); e.stopPropagation();
       const ok = await ensurePdfModule();
@@ -634,7 +631,7 @@ async function openDocForm(kind, docId, opts = {}) {
   draw();
 }
 
-// Expose for router (and convenience)
+// Expose for router
 window.renderSales = renderSales;
 window.renderSalesDocuments = renderSales;
 window.renderSalesList = renderSales;
