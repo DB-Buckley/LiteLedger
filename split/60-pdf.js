@@ -1,14 +1,15 @@
 // ============================================================================
-// 60-pdf.js — Minimal PDF/Print for Quotes / Orders / Invoices (resilient)
-// Opens a print-ready window (users can "Save as PDF").
-// Exposes: downloadInvoicePDF(id?, ctx?), exportInvoicePDF, generateInvoicePDF,
-//          getInvoiceHTML (returns {title, html})
-// ctx = { doc, lines } optional; if missing we load from IndexedDB.
-// Depends on: get, all, whereIndex; optional: currency, calcLineTotals, sumDoc
+// 60-pdf.js — HTML-based print preview for Quotes / Orders / Invoices / SCN
+// Exposes:
+//   getInvoiceHTML(docId, ctx?) -> { title, html }
+//   downloadInvoicePDF(docId, ctx?) -> opens print window
+//   getDocEmailDraft(docId, ctx?) -> { to, subject, body }  <-- NEW
+//
+// ctx?: { doc, lines } (optional; if omitted we load by docId)
+// Depends on: get, all, whereIndex, currency (optional), sumDoc (optional), calcLineTotals (optional)
 // ============================================================================
 
 (function () {
-  // --- Safe helpers (work even if helpers are missing) ----------------------
   const hasFn = (n) => typeof window[n] === "function";
 
   const safeCurrency = (v) => {
@@ -49,41 +50,6 @@
 
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 
-  // --- Window lifecycle -----------------------------------------------------
-  function openShellWindow(title = "Document") {
-    const w = window.open("", "_blank", "noopener,noreferrer");
-    if (!w) throw new Error("Popup blocked – allow popups for this site.");
-    w.document.open();
-    w.document.write(`<!doctype html><title>${esc(title)}</title><meta charset="utf-8"><style>
-      body{font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}
-      .muted{color:#777}
-      </style><div id="root" class="muted">Generating PDF…</div>`);
-    w.document.close();
-    return w;
-  }
-
-  function writeHTML(w, html, title) {
-    try { w.document.open(); w.document.write(html); w.document.close(); } catch {}
-    try { w.document.title = title || w.document.title; } catch {}
-    try { w.addEventListener("load", () => setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 200)); } catch {}
-  }
-
-  function writeError(w, message) {
-    try {
-      w.document.open();
-      w.document.write(`<!doctype html><meta charset="utf-8"><style>
-        body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}
-        pre{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:6px;border:1px solid #e5e7eb}
-        .bad{color:#b00020}
-      </style>
-      <h2 class="bad">Could not generate PDF</h2>
-      <p>${esc(message || "Unknown error")}</p>
-      <p class="muted">Check the console for details.</p>`);
-      w.document.close();
-    } catch {}
-  }
-
-  // --- Data load & HTML build ----------------------------------------------
   async function loadContext(docId, ctx) {
     const doc = ctx?.doc || (docId ? await get("docs", docId) : null);
     if (!doc) throw new Error("Document not found or not provided.");
@@ -114,6 +80,8 @@
     const title = `${doc.type || "DOCUMENT"} ${doc.no || ""}`.trim();
     const rows = (lines.length ? lines.map(ln => lineHTML(ln, settings.vatRate)).join("") :
       `<tr><td colspan="6" class="muted">No lines</td></tr>`);
+
+    const typeLabel = (doc.type === "SCN") ? "Credit Note" : (doc.type || "Document");
 
     const html = `<!doctype html>
 <html>
@@ -153,16 +121,17 @@
         <div class="small">${esc(company.vatNo ? "VAT: "+company.vatNo : "")}</div>
       </div>
       <div class="col r">
-        <h1>${esc(doc.type || "Document")}</h1>
+        <h1>${esc(typeLabel)}</h1>
         <div class="small"><span class="label">No:</span> <b>${esc(doc.no || "")}</b></div>
         <div class="small"><span class="label">Date:</span> ${esc(fmtDate(doc.dates?.issue))}</div>
         ${doc.dates?.due ? `<div class="small"><span class="label">Due:</span> ${esc(fmtDate(doc.dates?.due))}</div>` : ""}
+        ${doc.relatedDocId ? `<div class="small"><span class="label">Ref:</span> ${esc(doc.relatedDocId)}</div>` : ""}
       </div>
     </div>
 
     <div class="row" style="margin-top:14px">
       <div class="col">
-        <div class="label">Bill To</div>
+        <div class="label">${doc.type === "SCN" ? "Credit To" : "Bill To"}</div>
         <div><b>${esc(customer?.name || "")}</b></div>
         <div class="small">${esc(customer?.contact?.person || "")}</div>
         <div class="small">${esc(customer?.contact?.email || "")}</div>
@@ -201,29 +170,69 @@
     return { title, html };
   }
 
-  // --- Public API -----------------------------------------------------------
-
+  // Public: HTML for inline viewer
   async function getInvoiceHTML(docId, ctx) {
     const data = await loadContext(docId, ctx);
-    return buildHTML(data); // -> { title, html }
+    return buildHTML(data);
   }
   window.getInvoiceHTML = getInvoiceHTML;
 
-  // Write into a window you already opened (prevents popup blockers)
-  async function downloadInvoicePDFInto(targetWindow, docId, ctx) {
-    const w = targetWindow;
-    if (!w) throw new Error("No target window");
-    try {
-      const data = await loadContext(docId, ctx);
-      const { title, html } = buildHTML(data);
-      writeHTML(w, html, title);
-    } catch (err) {
-      console.error("[PDF]", err);
-      writeError(w, err?.message || String(err));
-    }
+  // Public: Email draft (to/subject/body) for a document
+  async function getDocEmailDraft(docId, ctx) {
+    const data = await loadContext(docId, ctx);
+    const { doc, company = {}, customer = {}, totals } = data;
+    const typeLabel = (doc.type === "SCN") ? "Credit Note" : (doc.type || "Document");
+    const to = customer?.contact?.email || "";
+    const subject = `${typeLabel} ${doc.no || ""} — ${company.tradingName || "from us"}`;
+    const bodyLines = [
+      customer?.contact?.person ? `Hi ${customer.contact.person},` : `Hello,`,
+      "",
+      `Please find attached your ${typeLabel.toLowerCase()} ${doc.no || ""}.`,
+      `Date: ${fmtDate(doc.dates?.issue)}`,
+      `Amount: ${safeCurrency(totals?.grandTotal || 0)}`,
+      doc.type === "SCN" && doc.relatedDocId ? `Original Invoice Ref: ${doc.relatedDocId}` : "",
+      "",
+      (company.tradingName ? `${company.tradingName}` : ""),
+      (company.email ? `Email: ${company.email}` : ""),
+    ].filter(Boolean);
+    return { to, subject, body: bodyLines.join("\n") };
+  }
+  window.getDocEmailDraft = getDocEmailDraft;
+
+  // Classic open-window print
+  function openShellWindow(title = "Document") {
+    const w = window.open("", "_blank", "noopener,noreferrer");
+    if (!w) throw new Error("Popup blocked – allow popups for this site.");
+    w.document.open();
+    w.document.write(`<!doctype html><title>${esc(title)}</title><meta charset="utf-8"><style>
+      body{font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}
+      .muted{color:#777}
+      </style><div id="root" class="muted">Generating…</div>`);
+    w.document.close();
+    return w;
   }
 
-  // Classic API (opens its own window)
+  function writeHTML(w, html, title) {
+    try { w.document.open(); w.document.write(html); w.document.close(); } catch {}
+    try { w.document.title = title || w.document.title; } catch {}
+    try { w.addEventListener("load", () => setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 200)); } catch {}
+  }
+
+  function writeError(w, message) {
+    try {
+      w.document.open();
+      w.document.write(`<!doctype html><meta charset="utf-8"><style>
+        body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}
+        pre{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:6px;border:1px solid #e5e7eb}
+        .bad{color:#b00020}
+      </style>
+      <h2 class="bad">Could not generate document</h2>
+      <p>${esc(message || "Unknown error")}</p>
+      <p class="muted">Check the console for details.</p>`);
+      w.document.close();
+    } catch {}
+  }
+
   async function downloadInvoicePDF(docId, ctx) {
     const w = openShellWindow("Generating…");
     try {
@@ -235,12 +244,6 @@
       writeError(w, err?.message || String(err));
     }
   }
-  async function exportInvoicePDF(docId, ctx)  { return downloadInvoicePDF(docId, ctx); }
-  async function generateInvoicePDF(docId, ctx){ return downloadInvoicePDF(docId, ctx); }
-
-  window.downloadInvoicePDFInto = downloadInvoicePDFInto;
-  window.downloadInvoicePDF     = downloadInvoicePDF;
-  window.exportInvoicePDF       = exportInvoicePDF;
-  window.generateInvoicePDF     = generateInvoicePDF;
+  window.downloadInvoicePDF = downloadInvoicePDF;
 
 })();
