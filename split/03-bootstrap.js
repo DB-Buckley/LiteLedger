@@ -153,9 +153,10 @@ async function ensureBootstrap() {
     v.pdf.layouts[type] = layoutDoc.id;
   };
 
-  await ensureLayout("QUOTE", "Default Quote");
-  await ensureLayout("ORDER", "Default Order");
+  await ensureLayout("QUOTE",   "Default Quote");
+  await ensureLayout("ORDER",   "Default Order");
   await ensureLayout("INVOICE", "Default Invoice");
+  await ensureLayout("PINV",    "Default Supplier Invoice"); // NEW: purchases PDF layout
 
   await put("settings", { key: "app", value: v });
 
@@ -184,6 +185,7 @@ async function ensureBootstrap() {
       termsDays: 30,
       notes: "",
       archived: false,
+      createdAt: nowISO(),
     });
   }
 
@@ -204,6 +206,7 @@ async function ensureBootstrap() {
       openingQty: 10,
       warehouseId: "WH1",
       nonStock: false,
+      createdAt: nowISO(),
     });
     await add("items", {
       id: randId(),
@@ -221,27 +224,31 @@ async function ensureBootstrap() {
       openingQty: 50,
       warehouseId: "WH1",
       nonStock: false,
+      createdAt: nowISO(),
     });
   }
 }
 
-// Capture the install prompt event once
+// Expose for startup
+window.ensureBootstrap = ensureBootstrap;
+
+// -------------------------- PWA Install Prompt ------------------------------
 window.deferredInstallEvent = null;
 
-window.addEventListener('beforeinstallprompt', (e) => {
+window.addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault(); // prevent auto prompt
   window.deferredInstallEvent = e; // stash it for later
   // Optional: make the "Install" button visible here
 });
 
-window.addEventListener('appinstalled', () => {
+window.addEventListener("appinstalled", () => {
   window.deferredInstallEvent = null; // clean up after install
 });
 
-
-document.addEventListener('click', async (e) => {
+// Click handler for an install button with id="install_btn"
+document.addEventListener("click", async (e) => {
   const t = e.target;
-  if (t && t.id === 'install_btn') {
+  if (t && t.id === "install_btn") {
     const ev = window.deferredInstallEvent;
     if (!ev) return;
     ev.prompt();
