@@ -59,16 +59,16 @@
       await put("items", item);
 
       await add("movements", {
-        id: randId(),
-        itemId: item.id,
-        warehouseId: wh,
-        type: "PURCHASE",
-        qtyDelta: qty,
-        costImpact: round2(netUnit * qty),
-        relatedDocId: doc.id,
-        timestamp: nowISO(),
-        note: `PINV ${doc.no}`,
-      });
+      id: randId(),
+      itemId: item.id,
+      warehouseId: wh,
+      type: "PURCHASE",              // label is arbitrary now that balanceQty is type-agnostic
+      qtyDelta: qty,                 // positive adds stock
+      costImpact: round2(netUnit * qty),
+      relatedDocId: doc.id,
+      timestamp: nowISO(),
+      note: `PINV ${doc.no}`,
+    });
     }
   }
 
