@@ -1,10 +1,8 @@
 // ============================================================================
-// 95-router.js — Hash Router
-// Depends on window.render* functions; lazy-loads chunks when needed.
+// 95-router.js — Hash Router with lazy loading
 // ============================================================================
 
 (function () {
-  // Path -> renderer function name on window
   const ROUTES = {
     "/": "renderDashboard",
     "/dashboard": "renderDashboard",
@@ -27,8 +25,10 @@
     "/quotes-history": "renderQuotesHistory",
     "/orders": "renderOrders",
     "/orders-history": "renderOrdersHistory",
-    "/invoices": "renderInvoices",
-    "/invoices-credited": "renderInvoicesCredited",
+    "/invoices": "renderInvoices",                    // Active
+    "/invoices-processed": "renderInvoicesProcessed", // Processed
+    "/credit-notes": "renderCreditNotes",             // SCN section
+    "/invoices-credited": "renderCreditNotes",        // alias/back-compat
 
     // Misc
     "/layouts": "renderLayouts",
@@ -37,10 +37,9 @@
     "/about": "renderAbout",
   };
 
-  // Lazy-load groups (tries files in order until one loads)
   const LAZY = [
     {
-      test: /^\/(quotes|quotes-history|orders|orders-history|invoices|invoices-credited)(\/|$)?/i,
+      test: /^\/(quotes|quotes-history|orders|orders-history|invoices|invoices-processed|credit-notes|invoices-credited)(\/|$)?/i,
       files: ["/split/50-sales-documents-quotes-orders-invoices.js", "/50-sales-documents-quotes-orders-invoices.js"],
     },
     {
@@ -64,13 +63,11 @@
 
   function loadScriptOnce(src) {
     return new Promise((resolve, reject) => {
-      // Already loaded?
-      const already = Array.from(document.scripts).some((s) => s.src && s.src.endsWith(src));
+      const already = Array.from(document.scripts).some(s => s.src && s.src.endsWith(src));
       if (already) return resolve(true);
-
       const s = document.createElement("script");
       s.src = src;
-      s.async = false; // keep execution order
+      s.async = false;
       s.onload = () => resolve(true);
       s.onerror = () => reject(new Error(`Failed to load ${src}`));
       document.head.appendChild(s);
@@ -78,15 +75,10 @@
   }
 
   async function ensureChunkFor(path) {
-    const group = LAZY.find((g) => g.test.test(path));
+    const group = LAZY.find(g => g.test.test(path));
     if (!group) return false;
     for (const f of group.files) {
-      try {
-        await loadScriptOnce(f);
-        return true;
-      } catch {
-        // try next fallback file
-      }
+      try { await loadScriptOnce(f); return true; } catch { /* try next */ }
     }
     return false;
   }
@@ -94,47 +86,30 @@
   async function renderRouteFromHash() {
     const path = getPath();
     const fnName = ROUTES[path] || "renderDashboard";
-
     try {
       let fn = window[fnName];
       if (typeof fn !== "function") {
         await ensureChunkFor(path);
         fn = window[fnName];
       }
-
-      if (typeof fn === "function") {
-        await fn();
-      } else {
-        console.warn(`Route "${path}" -> ${fnName} not available; falling back to dashboard.`);
-        await window.renderDashboard?.();
-      }
+      if (typeof fn === "function") await fn();
+      else { console.warn(`No renderer for ${path} (${fnName})`); await window.renderDashboard?.(); }
     } catch (e) {
       console.error("Route render failed:", e);
       const v = document.getElementById("view");
-      if (v) {
-        v.innerHTML = `<div class="card"><div class="hd"><b>Error</b></div>
-        <div class="bd"><pre style="white-space:pre-wrap">${(e && e.message) || e}</pre></div></div>`;
-      }
+      if (v) v.innerHTML = `<div class="card"><div class="hd"><b>Error</b></div><div class="bd"><pre style="white-space:pre-wrap">${(e && e.message) || e}</pre></div></div>`;
     }
   }
 
   function boot() {
-    // In-app anchor navigation
     document.body.addEventListener("click", (e) => {
-      const a = e.target.closest('a[href^="#/"]');
-      if (!a) return;
-      e.preventDefault();
-      const href = a.getAttribute("href");
-      if (href !== location.hash) location.hash = href;
+      const a = e.target.closest('a[href^="#/"]'); if (!a) return;
+      e.preventDefault(); const href = a.getAttribute("href"); if (href !== location.hash) location.hash = href;
     });
-
     window.addEventListener("hashchange", renderRouteFromHash);
     renderRouteFromHash();
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
 })();
