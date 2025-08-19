@@ -2,41 +2,35 @@
 // 50-sales-documents-quotes-orders-invoices.js
 // Sales: Quotes / Orders / Invoices + Processing + Credit Notes
 //
-// Fixes in this revision:
-// - PDF overlay dialog fills viewport height (96–98vh) + Fullscreen toggle
-// - Credit Notes totals are computed locally from ABS(qty) (no zero totals),
-//   stored on the SCN doc, and a NEGATIVE adjustment is posted so statements
-//   reflect a reduced customer balance.
-// - Qty inputs step in whole numbers (step="1") across sales forms + credit wizard
-//
-// Depends on: 01-db.js, 02-helpers.js
-// Works with: 60-pdf.js (getInvoiceHTML, getDocEmailDraft)
+// This build:
+// - PDF overlay fills viewport (works with 60-pdf.js responsive layout)
+// - Credit Notes: totals stored as positive, stock returned, and customer
+//   statement reduced (writes CUSTOMER_CREDIT negative, plus a mirror
+//   negative CUSTOMER_INVOICE for compatibility with older statements).
+// - Qty inputs step in whole numbers (step="1") everywhere.
 // ===========================================================================
 
 const __CREDIT_CFG = {
   CUSTOMER_INVOICE_TYPES: new Set(["INVOICE"]),
   CREDIT_DOC_TYPE: "SCN",
-  MOVEMENT_TYPE_CREDIT: "SALE_RETURN", // stock back in
-  MOVEMENT_TYPE_SALE: "SALE",          // stock out on invoice processing
+  MOVEMENT_TYPE_CREDIT: "SALE_RETURN",
+  MOVEMENT_TYPE_SALE: "SALE",
 };
 
 // ---------- Top-layer PDF overlay (<dialog>) ----------
 (function () {
   if (window.showPdfOverlay) return;
   window.showPdfOverlay = function showPdfOverlay(html, title, opts = {}) {
-    // Clean any existing overlay
     document.getElementById("pdf_overlay_dlg")?.close();
     document.getElementById("pdf_overlay_dlg")?.remove();
 
     const dlg = document.createElement("dialog");
     dlg.id = "pdf_overlay_dlg";
-    // Fill most of the viewport by default
     dlg.style.padding = "0";
     dlg.style.border = "0";
     dlg.style.width = "min(1100px, 96vw)";
     dlg.style.height = "96vh";
     dlg.style.maxHeight = "98vh";
-
     dlg.innerHTML = `
       <form method="dialog" style="display:flex;flex-direction:column;min-height:100%;border:1px solid #1f2937;border-radius:12px;overflow:hidden">
         <div class="hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #e5e7eb;background:#0b1220;color:#e5e7eb">
@@ -53,7 +47,6 @@ const __CREDIT_CFG = {
           <iframe id="doc_iframe" style="width:100%;height:100%;border:0;background:#fff;display:block"></iframe>
         </div>
       </form>`;
-
     document.body.appendChild(dlg);
 
     const iframe = dlg.querySelector("#doc_iframe");
@@ -65,7 +58,6 @@ const __CREDIT_CFG = {
       if (w) { w.document.open(); w.document.write(html); w.document.close(); }
     };
 
-    // Fullscreen toggle
     let fs = false;
     dlg.querySelector("#doc_full").onclick = () => {
       fs = !fs;
@@ -88,14 +80,31 @@ const __CREDIT_CFG = {
     }
 
     dlg.addEventListener("close", () => dlg.remove());
-    dlg.showModal(); // top layer
+    dlg.showModal();
   };
 })();
 
 // ===========================================================================
-// CREDIT NOTES (SCN) — processed, read-only; print/email only
+// Helpers used by Credit Notes + listings
 // ===========================================================================
+function totalsFromAbsLines(lines, vatDefault = 15) {
+  let sub = 0, tax = 0;
+  for (const ln of lines) {
+    const qty = Math.abs(Number(ln.qty) || 0);
+    const price = Number(ln.unitPrice ?? ln.unitCost ?? 0);
+    const disc = Math.max(0, Number(ln.discountPct || 0));
+    const rate = Number(ln.taxRate ?? vatDefault);
+    const ex = qty * price * (1 - disc / 100);
+    sub += ex;
+    tax += ex * (rate / 100);
+  }
+  const grand = round2(sub + tax);
+  return { subTotal: round2(sub), tax: round2(tax), grandTotal: grand };
+}
 
+// ===========================================================================
+// CREDIT NOTES (SCN) — processed, read-only
+// ===========================================================================
 (function attachCreditsAPI() {
   if (window.openCreditNoteWizard) return;
 
@@ -114,7 +123,6 @@ const __CREDIT_CFG = {
     return { inv, lines };
   }
 
-  // Remaining creditable qty per original line
   async function computeRemainingByLine(inv, lines) {
     const invByItem = new Map();
     for (const ln of lines) {
@@ -151,28 +159,11 @@ const __CREDIT_CFG = {
     return remainingPerLine;
   }
 
-  // Local robust totals (ABS qty), independent of any global sumDoc quirks
-  function totalsFromAbsLines(lines, vatDefault = 15) {
-    let sub = 0, tax = 0;
-    for (const ln of lines) {
-      const qty = Math.abs(Number(ln.qty) || 0);
-      const price = Number(ln.unitPrice ?? ln.unitCost ?? 0);
-      const disc = Math.max(0, Number(ln.discountPct || 0));
-      const rate = Number(ln.taxRate ?? vatDefault);
-      const ex = qty * price * (1 - disc / 100);
-      sub += ex;
-      tax += ex * (rate / 100);
-    }
-    const grand = round2(sub + tax);
-    return { subTotal: round2(sub), tax: round2(tax), grandTotal: grand };
-  }
-
   async function createCreditNoteFromInvoice(invoiceId, creditQtyByLineId) {
     const { inv, lines } = await loadInvoice(invoiceId);
     const settings = (await get("settings", "app"))?.value || {};
     const vatDefault = settings.vatRate ?? 15;
 
-    // Build SCN lines (persist NEGATIVE qty to represent a return)
     const creditLines = [];
     for (const ln of lines) {
       const qToCredit = Number(creditQtyByLineId[ln.id] || 0);
@@ -182,7 +173,7 @@ const __CREDIT_CFG = {
         docId: null,
         itemId: ln.itemId,
         itemName: ln.itemName,
-        qty: -Math.abs(qToCredit), // negative line on credit note
+        qty: -Math.abs(qToCredit), // negative on SCN line
         unitPrice: Number(ln.unitPrice ?? ln.unitCost ?? 0),
         discountPct: Number(ln.discountPct ?? 0),
         taxRate: Number(ln.taxRate ?? vatDefault),
@@ -191,10 +182,10 @@ const __CREDIT_CFG = {
     }
     if (!creditLines.length) throw new Error("No quantities selected to credit.");
 
-    // Totals: compute from ABS(qty) so credit shows as a positive amount
+    // Totals from ABS(qty)
     const totalsAbs = totalsFromAbsLines(creditLines, vatDefault);
 
-    // Create SCN doc (processed + read-only)
+    // Create SCN (processed + readOnly)
     const scn = {
       id: randId(),
       type: __CREDIT_CFG.CREDIT_DOC_TYPE,
@@ -207,7 +198,7 @@ const __CREDIT_CFG = {
       relatedDocId: inv.id,
       createdAt: nowISO(),
       processedAt: nowISO(),
-      totals: totalsAbs, // e.g. R40.00 for 1 x item @ R40
+      totals: totalsAbs, // positive grandTotal (e.g. 40.00)
       notes: `Credit for ${inv.type} ${inv.no}`,
     };
     await put("docs", scn);
@@ -215,7 +206,7 @@ const __CREDIT_CFG = {
     // Persist lines
     for (const cl of creditLines) { cl.docId = scn.id; await put("lines", cl); }
 
-    // Movements: put stock back (qtyDelta > 0)
+    // Stock back in
     for (const cl of creditLines) {
       const qty = Math.abs(cl.qty);
       if (qty > 0) {
@@ -232,7 +223,9 @@ const __CREDIT_CFG = {
       }
     }
 
-    // Statement impact: NEGATIVE adjustment reduces the amount owed
+    // Statement impact:
+    const amt = Math.abs(totalsAbs.grandTotal || 0);
+    // a) dedicated CUSTOMER_CREDIT (negative)
     try {
       await add("adjustments", {
         id: randId(),
@@ -240,12 +233,25 @@ const __CREDIT_CFG = {
         customerId: inv.customerId,
         docId: scn.id,
         relatedDocId: inv.id,
-        amount: -Math.abs(totalsAbs.grandTotal || 0), // e.g. -40.00
+        amount: -amt,
         createdAt: nowISO(),
       });
     } catch {}
+    // b) compatibility mirror — some statements only sum CUSTOMER_INVOICE/PAYMENT
+    try {
+      await add("adjustments", {
+        id: randId(),
+        kind: "CUSTOMER_INVOICE",   // negative to reduce A/R
+        customerId: inv.customerId,
+        docId: scn.id,
+        relatedDocId: inv.id,
+        amount: -amt,
+        createdAt: nowISO(),
+        mirrorOf: "CUSTOMER_CREDIT",
+      });
+    } catch {}
 
-    // Preview + email
+    // Preview
     try {
       const { title, html } = await getInvoiceHTML(scn.id, { doc: scn, lines: creditLines });
       let draft = null; try { draft = await getDocEmailDraft(scn.id, { doc: scn, lines: creditLines }); } catch {}
@@ -256,15 +262,11 @@ const __CREDIT_CFG = {
     }
 
     toast?.(`Credit Note ${scn.no} created`, "success");
-
-    // Refresh views so it appears immediately and statements can pick it up
     window.renderCreditNotes?.();
     window.renderInvoicesProcessed?.();
-
     return scn;
   }
 
-  // Wizard → creates processed SCN (no editor)
   window.openCreditNoteWizard = async function openCreditNoteWizard(invoiceId) {
     const { inv, lines } = await loadInvoice(invoiceId);
     const remainingPerLine = await computeRemainingByLine(inv, lines);
@@ -329,9 +331,7 @@ const __CREDIT_CFG = {
 
 // ===========================================================================
 // PROCESSING — mark invoice as PROCESSED (readOnly), post stock + adjustment
-// Public: window.processInvoiceById(id), window.batchProcessInvoicesByDate(isoDate)
 // ===========================================================================
-
 (async function attachProcessingAPI() {
   if (window.processInvoiceById) return;
 
@@ -340,8 +340,10 @@ const __CREDIT_CFG = {
     catch { return false; }
   }
   async function hasAdjustmentForDoc(docId) {
-    try { const adj = await all("adjustments"); return (adj || []).some(a => a.docId === docId && a.kind === "CUSTOMER_INVOICE"); }
-    catch { return false; }
+    try {
+      const adj = await all("adjustments");
+      return (adj || []).some(a => a.docId === docId && a.kind === "CUSTOMER_INVOICE");
+    } catch { return false; }
   }
   async function postInvoiceMovements(doc, lines) {
     const already = await hasMovementsForDoc(doc.id);
@@ -371,7 +373,7 @@ const __CREDIT_CFG = {
         kind: "CUSTOMER_INVOICE",
         customerId: doc.customerId,
         docId: doc.id,
-        amount: Math.abs(totals?.grandTotal || 0), // positive → increases receivable
+        amount: Math.abs(totals?.grandTotal || 0),
         createdAt: nowISO(),
       });
     } catch {}
@@ -427,11 +429,10 @@ const __CREDIT_CFG = {
 })();
 
 // ===========================================================================
-// SALES LISTS + FORMS (quotes/orders/invoices) with qty step fix + top-layer picker
+// SALES LISTS + FORMS
 // ===========================================================================
-
 async function renderSales(kind = "INVOICE", opts = {}) {
-  const invoiceView = opts.invoiceView || "active"; // 'active' | 'processed'
+  const invoiceView = opts.invoiceView || "active";
   const history = !!opts.history;
 
   const v = $("#view"); if (!v) return;
@@ -481,7 +482,21 @@ async function renderSales(kind = "INVOICE", opts = {}) {
            <input id="batch_date" type="date" style="margin-left:8px">
            <button type="button" class="btn" id="batch_process">Batch Process (date)</button>`);
 
-  v.innerHTML = `
+  // If any SCN doc is missing totals, compute+persist now (self-heal)
+  if (kind === "SCN" || isInvoices) {
+    try {
+      const settings = (await get("settings", "app"))?.value || {};
+      for (const d of (await all("docs")) || []) {
+        if (d.type === __CREDIT_CFG.CREDIT_DOC_TYPE && (!d.totals || !Number(d.totals.grandTotal))) {
+          const ls = await whereIndex("lines", "by_doc", d.id);
+          d.totals = totalsFromAbsLines(ls, settings.vatRate ?? 15);
+          await put("docs", d);
+        }
+      }
+    } catch {}
+  }
+
+  const vHtml = `
   <div class="card">
     <div class="hd">
       <b>${label}</b>
@@ -510,14 +525,14 @@ async function renderSales(kind = "INVOICE", opts = {}) {
       </table>
     </div>
   </div>`;
+  const container = v;
+  container.innerHTML = vHtml;
 
-  // Search
   $("#d_search").oninput = () => {
     const q = ($("#d_search").value || "").toLowerCase();
     $$("#d_rows tr").forEach((tr) => tr.style.display = tr.textContent.toLowerCase().includes(q) ? "" : "none");
   };
 
-  // Toolbar nav
   $("#d_history")?.addEventListener("click", () => (location.hash = "#/quotes-history"));
   $("#d_back_active")?.addEventListener("click", () => (location.hash = "#/quotes"));
   $("#d_orders_history")?.addEventListener("click", () => (location.hash = "#/orders-history"));
@@ -526,7 +541,6 @@ async function renderSales(kind = "INVOICE", opts = {}) {
   $("#d_invoices_active")?.addEventListener("click", () => (location.hash = "#/invoices"));
   $("#d_credit_notes")?.addEventListener("click", () => (location.hash = "#/credit-notes"));
 
-  // Batch processing quick helper
   if (isInvoices && invoiceView === "active") {
     const d = $("#batch_date");
     if (d && !d.value) d.value = nowISO().slice(0,10);
@@ -537,10 +551,8 @@ async function renderSales(kind = "INVOICE", opts = {}) {
     });
   }
 
-  // New
   $("#d_new")?.addEventListener("click", () => openDocForm(kind));
 
-  // View
   $$("#d_rows [data-view]").forEach((b) =>
     (b.onclick = () => {
       const ro = (kind === "QUOTE" || kind === "ORDER") ? history : false;
@@ -549,12 +561,23 @@ async function renderSales(kind = "INVOICE", opts = {}) {
   );
 }
 
-// Credit Notes list (SCN)
 async function renderCreditNotes() {
   const v = $("#view"); if (!v) return;
   const docs = (await all("docs") || [])
     .filter(d => d.type === __CREDIT_CFG.CREDIT_DOC_TYPE)
     .sort((a,b) => (b.dates?.issue || "").localeCompare(a.dates?.issue || ""));
+
+  // self-heal totals if any zero
+  try {
+    const settings = (await get("settings", "app"))?.value || {};
+    for (const d of docs) {
+      if (!d.totals || !Number(d.totals.grandTotal)) {
+        const ls = await whereIndex("lines", "by_doc", d.id);
+        d.totals = totalsFromAbsLines(ls, settings.vatRate ?? 15);
+        await put("docs", d);
+      }
+    }
+  } catch {}
 
   const customers = await all("customers");
   const cname = (id) => customers.find((c) => c.id === id)?.name || "—";
@@ -611,7 +634,6 @@ async function openDocForm(kind, docId, opts = {}) {
   const editing = !!docId;
   const existing = editing ? await get("docs", docId) : null;
 
-  // Customers
   const allCustomers = (await all("customers")) || [];
   const activeCustomers = allCustomers.filter((c) => !c.archived);
 
@@ -619,7 +641,6 @@ async function openDocForm(kind, docId, opts = {}) {
   const settings = settingsRec?.value || {};
   const allItemsRaw = await all("items");
 
-  // Normalize items
   const items = (allItemsRaw || []).map((raw) => ({
     raw,
     id: raw.id ?? raw.itemId ?? raw.sku ?? raw.code ?? null,
@@ -656,7 +677,6 @@ async function openDocForm(kind, docId, opts = {}) {
   const m = $("#modal"), body = $("#modalBody");
   if (!m || !body) { console.error("[SalesDoc] Modal elements not found."); return; }
 
-  // ---------- helpers ----------
   const custOptsActive = activeCustomers
     .map(
       (c) => `<option value="${c.id}" ${c.id === doc.customerId ? "selected" : ""}>${c.name}</option>`
@@ -767,7 +787,7 @@ async function openDocForm(kind, docId, opts = {}) {
     );
   }
 
-  // ---- Item Picker Overlay — use <dialog> so it stacks on top of form modal ----
+  // ---- Item Picker Overlay (<dialog>) ----
   function openItemPicker(opts = {}) {
     document.getElementById("sd_picker_dlg")?.close();
     document.getElementById("sd_picker_dlg")?.remove();
@@ -912,7 +932,6 @@ async function openDocForm(kind, docId, opts = {}) {
       $("#sd_wh").oninput = () => (doc.warehouseId = $("#sd_wh").value);
       $("#sd_notes").oninput = () => (doc.notes = $("#sd_notes").value);
 
-      // Save / Create
       actions.querySelector("#sd_save").addEventListener("click", async (e) => {
         e.preventDefault(); e.stopPropagation();
         recalc();
@@ -929,7 +948,6 @@ async function openDocForm(kind, docId, opts = {}) {
         renderSales(kind, { invoiceView: "active" });
       });
 
-      // Convert
       const convertBtn = $("#sd_convert");
       if (convertBtn && kind === "QUOTE") {
         convertBtn.onclick = async (e) => {
@@ -969,7 +987,6 @@ async function openDocForm(kind, docId, opts = {}) {
         };
       }
 
-      // Delete (blocked for INVOICE)
       const delBtn = $("#sd_delete");
       if (delBtn) {
         delBtn.addEventListener("click", async (e) => {
@@ -983,7 +1000,6 @@ async function openDocForm(kind, docId, opts = {}) {
         });
       }
 
-      // Process (individual)
       const procBtn = $("#sd_process");
       if (procBtn) {
         procBtn.onclick = async (e) => {
@@ -1001,7 +1017,6 @@ async function openDocForm(kind, docId, opts = {}) {
       }
     }
 
-    // PDF
     actions.querySelector("#sd_pdf").addEventListener("click", async (e) => {
       e.preventDefault(); e.stopPropagation();
       try {
@@ -1011,7 +1026,6 @@ async function openDocForm(kind, docId, opts = {}) {
       } catch (err) { console.error(err); toast?.("PDF render failed"); }
     });
 
-    // Credit (only after processed)
     document.getElementById("sd_credit")?.addEventListener("click", (e) => {
       e.preventDefault(); e.stopPropagation();
       try { window.openCreditNoteWizard(doc.id); } catch (err) { console.error(err); alert(err?.message || err); }
