@@ -1,12 +1,7 @@
 // ============================================================================
-// 60-pdf.js — HTML-based print preview for Quotes / Orders / Invoices / SCN
-// Exposes:
-//   getInvoiceHTML(docId, ctx?) -> { title, html }
-//   downloadInvoicePDF(docId, ctx?) -> opens print window
-//   getDocEmailDraft(docId, ctx?) -> { to, subject, body }  <-- NEW
-//
-// ctx?: { doc, lines } (optional; if omitted we load by docId)
-// Depends on: get, all, whereIndex, currency (optional), sumDoc (optional), calcLineTotals (optional)
+// 60-pdf.js — Print HTML for Quotes / Orders / Invoices / Credit Notes
+// Responsive-on-screen (fills iframe) + A4-at-print.
+// For SCN we compute totals from ABS(qty) and prefer stored doc.totals.
 // ============================================================================
 
 (function () {
@@ -30,17 +25,21 @@
     return { exTax: ex, tax, incTax: inc };
   };
 
-  const safeSumDoc = (lines, vatRate) => {
-    if (hasFn("sumDoc")) return window.sumDoc(lines.map(l => ({
-      qty: l.qty, unitPrice: l.unitPrice ?? l.unitCost ?? 0,
-      discountPct: l.discountPct ?? 0, taxRate: l.taxRate ?? vatRate ?? 15,
-    })));
+  const sumFromLines = (lines, vatRate) => {
     let sub = 0, tax = 0;
     for (const ln of lines) {
       const t = safeCalcTotals(ln, vatRate);
       sub += t.exTax; tax += t.tax;
     }
     return { subTotal: sub, tax, grandTotal: sub + tax };
+  };
+
+  const safeSumDoc = (lines, vatRate) => {
+    if (hasFn("sumDoc")) return window.sumDoc(lines.map(l => ({
+      qty: l.qty, unitPrice: l.unitPrice ?? l.unitCost ?? 0,
+      discountPct: l.discountPct ?? 0, taxRate: l.taxRate ?? vatRate ?? 15,
+    })));
+    return sumFromLines(lines, vatRate);
   };
 
   const fmtDate = (s) => {
@@ -58,7 +57,17 @@
     const settings = (await get("settings", "app"))?.value || {};
     const customer = doc.customerId ? (await get("customers", doc.customerId)) : null;
 
-    const totals = safeSumDoc(lines || [], settings.vatRate ?? 15);
+    // For Credit Notes, display totals should be based on ABS(qty)
+    const displayLinesForTotals = (doc.type === "SCN")
+      ? (lines || []).map(l => ({ ...l, qty: Math.abs(Number(l.qty) || 0) }))
+      : (lines || []);
+
+    const computedTotals = safeSumDoc(displayLinesForTotals, settings.vatRate ?? 15);
+    const totals =
+      (doc.totals && Number(doc.totals.grandTotal) > 0)
+        ? doc.totals
+        : computedTotals;
+
     return { doc, lines, company, customer, settings, totals };
   }
 
@@ -78,8 +87,10 @@
   function buildHTML(ctx) {
     const { doc, lines = [], company = {}, customer = {}, settings = {}, totals } = ctx;
     const title = `${doc.type || "DOCUMENT"} ${doc.no || ""}`.trim();
-    const rows = (lines.length ? lines.map(ln => lineHTML(ln, settings.vatRate)).join("") :
-      `<tr><td colspan="6" class="muted">No lines</td></tr>`);
+
+    const rows = (lines.length
+      ? lines.map(ln => lineHTML(ln, settings.vatRate)).join("")
+      : `<tr><td colspan="6" class="muted">No lines</td></tr>`);
 
     const typeLabel = (doc.type === "SCN") ? "Credit Note" : (doc.type || "Document");
 
@@ -92,8 +103,11 @@
 <style>
   :root { --fg:#111; --muted:#666; --line:#e5e5e5; }
   * { box-sizing:border-box; }
-  body { font: 12px/1.45 -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; color:var(--fg); margin:0; }
-  .page { width: 210mm; min-height: 297mm; margin: 0 auto; padding: 18mm 16mm; background:#fff; }
+  body { font: 13px/1.5 -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; color:var(--fg); margin:0; background:#fff; }
+  .page { margin: 0 auto; padding: 24px 20px; width: min(960px, 94vw); }
+  @media print {
+    .page { width: 210mm; padding: 18mm 16mm; }
+  }
   h1 { font-size: 22px; margin:0 0 8px; letter-spacing: .5px; }
   .muted { color: var(--muted); }
   .row { display:flex; gap:16px; align-items:flex-start; justify-content:space-between; }
@@ -102,7 +116,7 @@
   .t { margin-top: 14px; width: 100%; border-collapse: collapse; }
   .t th, .t td { border-bottom: 1px solid var(--line); padding: 8px 6px; vertical-align: top; }
   .t th { text-align:left; font-weight: 600; font-size: 11px; color:var(--muted); }
-  .totalbox { margin-top: 10px; margin-left: auto; width: 320px; }
+  .totalbox { margin-top: 12px; margin-left: auto; width: 360px; max-width: 100%; }
   .totalbox .row { gap: 12px; }
   .label { color:var(--muted); }
   .brand { font-weight:700; font-size: 18px; }
@@ -170,14 +184,12 @@
     return { title, html };
   }
 
-  // Public: HTML for inline viewer
   async function getInvoiceHTML(docId, ctx) {
     const data = await loadContext(docId, ctx);
     return buildHTML(data);
   }
   window.getInvoiceHTML = getInvoiceHTML;
 
-  // Public: Email draft (to/subject/body) for a document
   async function getDocEmailDraft(docId, ctx) {
     const data = await loadContext(docId, ctx);
     const { doc, company = {}, customer = {}, totals } = data;
@@ -199,15 +211,11 @@
   }
   window.getDocEmailDraft = getDocEmailDraft;
 
-  // Classic open-window print
   function openShellWindow(title = "Document") {
     const w = window.open("", "_blank", "noopener,noreferrer");
     if (!w) throw new Error("Popup blocked – allow popups for this site.");
     w.document.open();
-    w.document.write(`<!doctype html><title>${esc(title)}</title><meta charset="utf-8"><style>
-      body{font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}
-      .muted{color:#777}
-      </style><div id="root" class="muted">Generating…</div>`);
+    w.document.write(`<!doctype html><title>${esc(title)}</title><meta charset="utf-8"><div>Generating…</div>`);
     w.document.close();
     return w;
   }
@@ -221,14 +229,7 @@
   function writeError(w, message) {
     try {
       w.document.open();
-      w.document.write(`<!doctype html><meta charset="utf-8"><style>
-        body{font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial;margin:24px;color:#222}
-        pre{white-space:pre-wrap;background:#f6f8fa;padding:12px;border-radius:6px;border:1px solid #e5e7eb}
-        .bad{color:#b00020}
-      </style>
-      <h2 class="bad">Could not generate document</h2>
-      <p>${esc(message || "Unknown error")}</p>
-      <p class="muted">Check the console for details.</p>`);
+      w.document.write(`<!doctype html><meta charset="utf-8"><pre>${esc(message || "Unknown error")}</pre>`);
       w.document.close();
     } catch {}
   }
