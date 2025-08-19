@@ -27,7 +27,7 @@
     "/orders-history": "renderOrdersHistory",
     "/invoices": "renderInvoices",                    // Active
     "/invoices-processed": "renderInvoicesProcessed", // Processed
-    "/credit-notes": "renderCreditNotes",             // SCN section
+    "/credit-notes": "renderCreditNotes",
     "/invoices-credited": "renderCreditNotes",        // alias/back-compat
 
     // Misc
@@ -40,7 +40,10 @@
   const LAZY = [
     {
       test: /^\/(quotes|quotes-history|orders|orders-history|invoices|invoices-processed|credit-notes|invoices-credited)(\/|$)?/i,
-      files: ["/split/50-sales-documents-quotes-orders-invoices.js", "/50-sales-documents-quotes-orders-invoices.js"],
+      files: [
+        "/split/50-sales-documents-quotes-orders-invoices.js",
+        "/50-sales-documents-quotes-orders-invoices.js"
+      ],
     },
     {
       test: /^\/(purchases|purchases-processed|supplier-payments)(\/|$)?/i,
@@ -86,14 +89,23 @@
   async function renderRouteFromHash() {
     const path = getPath();
     const fnName = ROUTES[path] || "renderDashboard";
+
+    // Always try to load the chunk for this path first (even if a wrapper fn exists)
+    try { await ensureChunkFor(path); } catch {}
+
     try {
       let fn = window[fnName];
       if (typeof fn !== "function") {
+        // one more attempt in case the chunk loaded a wrapper name
         await ensureChunkFor(path);
         fn = window[fnName];
       }
-      if (typeof fn === "function") await fn();
-      else { console.warn(`No renderer for ${path} (${fnName})`); await window.renderDashboard?.(); }
+      if (typeof fn === "function") {
+        await fn();
+      } else {
+        console.warn(`No renderer for ${path} (${fnName})`);
+        await window.renderDashboard?.();
+      }
     } catch (e) {
       console.error("Route render failed:", e);
       const v = document.getElementById("view");
